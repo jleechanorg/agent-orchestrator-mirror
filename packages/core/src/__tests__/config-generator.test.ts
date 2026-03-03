@@ -16,6 +16,7 @@ import {
   configToYaml,
   isRepoAlreadyCloned,
   resolveCloneTarget,
+  sanitizeProjectId,
 } from "../config-generator.js";
 
 // =============================================================================
@@ -328,6 +329,60 @@ describe("generateConfigFromUrl", () => {
     const parsed = parseRepoUrl("https://github.com/owner/repo");
     const config = generateConfigFromUrl({ parsed, repoPath: tmpDir, port: 8080 });
     expect(config.port).toBe(8080);
+  });
+
+  it("preserves CamelCase for session prefix generation", () => {
+    const parsed = parseRepoUrl("https://github.com/ComposioHQ/DevOS");
+    const config = generateConfigFromUrl({ parsed, repoPath: tmpDir });
+
+    const projects = config.projects as Record<string, Record<string, unknown>>;
+    // projectId key should be lowercase
+    expect(projects.devos).toBeDefined();
+    // sessionPrefix should use CamelCase path: D, O, S → "dos"
+    expect(projects.devos.sessionPrefix).toBe("dos");
+  });
+
+  it("produces valid session prefix for repo names with dots", () => {
+    const parsed = parseRepoUrl("https://github.com/owner/my.app");
+    const config = generateConfigFromUrl({ parsed, repoPath: tmpDir });
+
+    const projects = config.projects as Record<string, Record<string, unknown>>;
+    // projectId key: dot replaced with hyphen
+    expect(projects["my-app"]).toBeDefined();
+    // sessionPrefix: "my.app" → sanitized to "my-app" → kebab initials → "ma"
+    const prefix = projects["my-app"].sessionPrefix as string;
+    expect(prefix).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(prefix).toBe("ma");
+  });
+});
+
+// =============================================================================
+// sanitizeProjectId
+// =============================================================================
+
+describe("sanitizeProjectId", () => {
+  it("lowercases the name", () => {
+    expect(sanitizeProjectId("DevOS")).toBe("devos");
+  });
+
+  it("replaces dots with hyphens", () => {
+    expect(sanitizeProjectId("my.app")).toBe("my-app");
+  });
+
+  it("replaces multiple special chars", () => {
+    expect(sanitizeProjectId("My@Cool.App!")).toBe("my-cool-app");
+  });
+
+  it("collapses consecutive hyphens", () => {
+    expect(sanitizeProjectId("my--app")).toBe("my-app");
+  });
+
+  it("strips leading/trailing hyphens", () => {
+    expect(sanitizeProjectId("-my-app-")).toBe("my-app");
+  });
+
+  it("preserves valid characters", () => {
+    expect(sanitizeProjectId("my-app_v2")).toBe("my-app_v2");
   });
 });
 

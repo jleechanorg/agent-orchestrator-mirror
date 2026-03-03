@@ -165,6 +165,18 @@ export function detectProjectInfo(repoDir: string): DetectedProjectInfo {
 // CONFIG GENERATION
 // =============================================================================
 
+/**
+ * Sanitize a repo name for use as a YAML project key.
+ * Lowercases, replaces dots/special chars with hyphens, strips leading/trailing hyphens.
+ */
+export function sanitizeProjectId(repoName: string): string {
+  return repoName
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
 export interface GenerateConfigOptions {
   /** Parsed repo URL */
   parsed: ParsedRepoUrl;
@@ -184,8 +196,13 @@ export function generateConfigFromUrl(options: GenerateConfigOptions): Record<st
   const platform = detectScmPlatform(parsed.host);
   const defaultBranch = detectDefaultBranchFromDir(repoPath);
   const projectInfo = detectProjectInfo(repoPath);
-  const projectId = parsed.repo.toLowerCase();
-  const prefix = generateSessionPrefix(projectId);
+  // Use original case for prefix generation (preserves CamelCase detection),
+  // lowercase for the YAML project key.
+  const projectId = sanitizeProjectId(parsed.repo);
+  // Strip characters invalid in sessionPrefix (Zod: [a-zA-Z0-9_-]+) before
+  // passing to generateSessionPrefix, so "my.app" → "my-app" → "ma" (kebab path).
+  const prefixInput = parsed.repo.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+  const prefix = generateSessionPrefix(prefixInput || parsed.repo);
 
   // Build project config
   const projectConfig: Record<string, unknown> = {

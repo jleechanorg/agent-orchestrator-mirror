@@ -91,6 +91,7 @@ export {
   configToYaml,
   isRepoAlreadyCloned,
   resolveCloneTarget,
+  sanitizeProjectId,
 } from "./config-generator.js";
 export type {
   ParsedRepoUrl,
