@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import type { DashboardSession, SSESnapshotEvent } from "@/lib/types";
 
 type Action =
@@ -25,7 +25,12 @@ function reducer(state: DashboardSession[], action: Action): DashboardSession[] 
           return s;
         }
         changed = true;
-        return { ...s, status: patch.status, activity: patch.activity, lastActivityAt: patch.lastActivityAt };
+        return {
+          ...s,
+          status: patch.status,
+          activity: patch.activity,
+          lastActivityAt: patch.lastActivityAt,
+        };
       });
       return changed ? next : state;
     }
@@ -34,6 +39,12 @@ function reducer(state: DashboardSession[], action: Action): DashboardSession[] 
 
 export function useSessionEvents(initialSessions: DashboardSession[]): DashboardSession[] {
   const [sessions, dispatch] = useReducer(reducer, initialSessions);
+  const sessionsRef = useRef(sessions);
+  const refreshingRef = useRef(false);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   // Reset state when server-rendered props change (e.g. full page refresh)
   useEffect(() => {
@@ -48,7 +59,28 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
         const data = JSON.parse(event.data as string) as { type: string };
         if (data.type === "snapshot") {
           const snapshot = data as SSESnapshotEvent;
-          dispatch({ type: "snapshot", patches: snapshot.sessions });
+          const workerPatches = snapshot.sessions.filter((s) => !s.id.endsWith("-orchestrator"));
+          dispatch({ type: "snapshot", patches: workerPatches });
+
+          const currentIds = new Set(sessionsRef.current.map((s) => s.id));
+          const snapshotIds = new Set(workerPatches.map((s) => s.id));
+          const sameMembership =
+            currentIds.size === snapshotIds.size &&
+            [...snapshotIds].every((id) => currentIds.has(id));
+
+          if (!sameMembership && !refreshingRef.current) {
+            refreshingRef.current = true;
+            void fetch("/api/sessions")
+              .then((res) => (res.ok ? res.json() : null))
+              .then((payload: { sessions?: DashboardSession[] } | null) => {
+                if (payload?.sessions) {
+                  dispatch({ type: "reset", sessions: payload.sessions });
+                }
+              })
+              .finally(() => {
+                refreshingRef.current = false;
+              });
+          }
         }
       } catch {
         // Ignore malformed messages

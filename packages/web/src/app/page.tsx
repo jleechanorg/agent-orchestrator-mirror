@@ -14,6 +14,21 @@ import { getProjectName } from "@/lib/project-name";
 
 export const dynamic = "force-dynamic";
 
+function resolveGlobalPause(sessions: Array<{ id: string; metadata: Record<string, string> }>) {
+  const orchestrator = sessions.find((s) => s.id.endsWith("-orchestrator"));
+  const pausedUntil = orchestrator?.metadata["globalPauseUntil"];
+  if (!pausedUntil) return null;
+
+  const parsed = new Date(pausedUntil);
+  if (Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) return null;
+
+  return {
+    pausedUntil: parsed.toISOString(),
+    reason: orchestrator?.metadata["globalPauseReason"] ?? "Model rate limit reached",
+    sourceSessionId: orchestrator?.metadata["globalPauseSource"] ?? null,
+  };
+}
+
 export async function generateMetadata(): Promise<Metadata> {
   const projectName = getProjectName();
   // Use absolute to opt out of the layout's "%s | project" template
@@ -23,10 +38,13 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function Home() {
   let sessions: DashboardSession[] = [];
   let orchestratorId: string | null = null;
+  let globalPause: { pausedUntil: string; reason: string; sourceSessionId: string | null } | null =
+    null;
   const projectName = getProjectName();
   try {
     const { config, registry, sessionManager } = await getServices();
     const allSessions = await sessionManager.list();
+    globalPause = resolveGlobalPause(allSessions);
 
     // Find the orchestrator session (any session ending with -orchestrator)
     // Only set orchestratorId if an actual session exists (no fallback)
@@ -41,7 +59,10 @@ export default async function Home() {
 
     // Enrich metadata (issue labels, agent summaries, issue titles) — cap at 3s
     const metaTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3_000));
-    await Promise.race([enrichSessionsMetadata(coreSessions, sessions, config, registry), metaTimeout]);
+    await Promise.race([
+      enrichSessionsMetadata(coreSessions, sessions, config, registry),
+      metaTimeout,
+    ]);
 
     // Enrich sessions that have PRs with live SCM data
     // Skip enrichment for terminal sessions (merged, closed, done, terminated)
@@ -101,6 +122,12 @@ export default async function Home() {
   }
 
   return (
-    <Dashboard initialSessions={sessions} stats={computeStats(sessions)} orchestratorId={orchestratorId} projectName={projectName} />
+    <Dashboard
+      initialSessions={sessions}
+      stats={computeStats(sessions)}
+      orchestratorId={orchestratorId}
+      projectName={projectName}
+      globalPause={globalPause}
+    />
   );
 }

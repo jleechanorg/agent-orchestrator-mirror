@@ -354,7 +354,7 @@ describe("session kill", () => {
 
     const output = consoleSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(output).toContain("Session app-1 killed.");
-    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", { purgeOpenCode: false });
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", { purgeOpenCode: true });
   });
 
   it("calls session manager kill with the session name", async () => {
@@ -364,7 +364,7 @@ describe("session kill", () => {
 
     await program.parseAsync(["node", "test", "session", "kill", "app-1"]);
 
-    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", { purgeOpenCode: false });
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", { purgeOpenCode: true });
   });
 
   it("passes purge flag for OpenCode cleanup", async () => {
