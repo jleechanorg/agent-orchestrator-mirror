@@ -6,6 +6,7 @@ import {
   type DashboardStats,
   type DashboardPR,
   type AttentionLevel,
+  type GlobalPauseState,
   getAttentionLevel,
   isPRRateLimited,
 } from "@/lib/types";
@@ -20,7 +21,7 @@ interface DashboardProps {
   stats: DashboardStats;
   orchestratorId?: string | null;
   projectName?: string;
-  globalPause?: { pausedUntil: string; reason: string; sourceSessionId: string | null } | null;
+  initialGlobalPause?: GlobalPauseState | null;
 }
 
 const KANBAN_LEVELS = ["working", "pending", "review", "respond", "merge"] as const;
@@ -30,9 +31,9 @@ export function Dashboard({
   stats,
   orchestratorId,
   projectName,
-  globalPause,
+  initialGlobalPause,
 }: DashboardProps) {
-  const sessions = useSessionEvents(initialSessions);
+  const { sessions, globalPause } = useSessionEvents(initialSessions, initialGlobalPause ?? null);
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
   const grouped = useMemo(() => {
     const zones: Record<AttentionLevel, DashboardSession[]> = {

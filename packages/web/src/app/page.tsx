@@ -112,7 +112,7 @@ export default async function Home() {
       stats={computeStats(sessions)}
       orchestratorId={orchestratorId}
       projectName={projectName}
-      globalPause={globalPause}
+      initialGlobalPause={globalPause}
     />
   );
 }
