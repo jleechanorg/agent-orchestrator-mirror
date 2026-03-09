@@ -577,6 +577,91 @@ describe("API Routes", () => {
       expect(event.sessions[0]).toHaveProperty("id");
       expect(event.sessions[0]).toHaveProperty("attentionLevel");
     });
+
+    it("excludes orchestrator sessions from snapshot", async () => {
+      const sessionsWithOrchestrator = [
+        ...testSessions,
+        makeSession({
+          id: "my-app-orchestrator",
+          projectId: "my-app",
+          status: "working",
+          activity: "active",
+        }),
+      ];
+      (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sessionsWithOrchestrator,
+      );
+
+      const res = await eventsGET(makeRequest("http://localhost:3000/api/events"));
+      const reader = res.body!.getReader();
+      const { value } = await reader.read();
+      reader.cancel();
+      const text = new TextDecoder().decode(value);
+      const jsonStr = text.replace("data: ", "").trim();
+      const event = JSON.parse(jsonStr);
+
+      const sessionIds = event.sessions.map((s: { id: string }) => s.id);
+      expect(sessionIds).not.toContain("my-app-orchestrator");
+      expect(sessionIds.every((id: string) => !id.endsWith("-orchestrator"))).toBe(true);
+    });
+
+    it("filters sessions by project query param", async () => {
+      const multiProjectSessions = [
+        ...testSessions,
+        makeSession({
+          id: "other-app-1",
+          projectId: "other-app",
+          status: "working",
+          activity: "active",
+        }),
+      ];
+      (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        multiProjectSessions,
+      );
+
+      const res = await eventsGET(makeRequest("http://localhost:3000/api/events?project=my-app"));
+      const reader = res.body!.getReader();
+      const { value } = await reader.read();
+      reader.cancel();
+      const text = new TextDecoder().decode(value);
+      const event = JSON.parse(text.replace("data: ", "").trim());
+
+      expect(event.sessions.every((s: { id: string }) => s.id !== "other-app-1")).toBe(true);
+    });
+
+    it("returns all non-orchestrator sessions when project=all", async () => {
+      const multiProjectSessions = [
+        ...testSessions,
+        makeSession({
+          id: "other-app-1",
+          projectId: "other-app",
+          status: "working",
+          activity: "active",
+        }),
+        makeSession({
+          id: "my-app-orchestrator",
+          projectId: "my-app",
+          status: "working",
+          activity: "active",
+        }),
+      ];
+      (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        multiProjectSessions,
+      );
+
+      const res = await eventsGET(makeRequest("http://localhost:3000/api/events?project=all"));
+      const reader = res.body!.getReader();
+      const { value } = await reader.read();
+      reader.cancel();
+      const text = new TextDecoder().decode(value);
+      const event = JSON.parse(text.replace("data: ", "").trim());
+
+      // Should include both projects' worker sessions
+      const sessionIds = event.sessions.map((s: { id: string }) => s.id);
+      expect(sessionIds).toContain("other-app-1");
+      // But exclude orchestrator
+      expect(sessionIds).not.toContain("my-app-orchestrator");
+    });
   });
 
   // ── GET /api/sessions?project=X (project filtering) ───────────────────────

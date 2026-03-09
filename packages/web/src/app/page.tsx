@@ -20,15 +20,17 @@ export async function generateMetadata(): Promise<Metadata> {
   return { title: { absolute: `ao | ${projectName}` } };
 }
 
-export default async function Home() {
+export default async function Home(props: { searchParams: Promise<{ project?: string }> }) {
+  const searchParams = await props.searchParams;
   let sessions: DashboardSession[] = [];
   let orchestratorId: string | null = null;
-  const projectId = getPrimaryProjectId();
+  const defaultProjectId = getPrimaryProjectId();
+  // Allow ?project=all to show all sessions (for multi-project setups)
+  const projectFilter = searchParams.project ?? defaultProjectId;
+
   try {
     const { config, registry, sessionManager } = await getServices();
     const allSessions = await sessionManager.list();
-
-    const projectFilter = projectId;
 
     if (projectFilter && projectFilter !== "all") {
       const orchSession = allSessions.find(
@@ -115,7 +117,7 @@ export default async function Home() {
       initialSessions={sessions}
       stats={computeStats(sessions)}
       orchestratorId={orchestratorId}
-      projectId={projectId}
+      projectId={projectFilter === "all" ? undefined : projectFilter}
       projectName={projectName}
     />
   );

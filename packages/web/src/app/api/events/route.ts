@@ -22,8 +22,10 @@ export async function GET(request: Request): Promise<Response> {
     sessions: Session[],
     config: { projects: Record<string, { sessionPrefix?: string }> },
   ) => {
-    if (!projectFilter || projectFilter === "all") return sessions;
-    return sessions.filter((s) => matchesProject(s, projectFilter, config.projects));
+    // Always exclude orchestrator sessions — they get their own button, not a card
+    const nonOrchestrators = sessions.filter((s) => !s.id.endsWith("-orchestrator"));
+    if (!projectFilter || projectFilter === "all") return nonOrchestrators;
+    return nonOrchestrators.filter((s) => matchesProject(s, projectFilter, config.projects));
   };
 
   const stream = new ReadableStream({
