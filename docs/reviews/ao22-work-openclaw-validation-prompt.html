@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WORK OpenClaw Validation Prompt</title>
+    <style>
+      :root {
+        --bg: #f5f2ea;
+        --panel: #fffdf8;
+        --ink: #17130f;
+        --muted: #6b6258;
+        --line: #dccfbf;
+        --accent: #0d5b77;
+        --accent-ink: #ecf8fd;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 1.2rem;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 12% 10%, #eaddcc 0%, transparent 32%),
+          radial-gradient(circle at 84% 88%, #e8d8bf 0%, transparent 28%), var(--bg);
+      }
+
+      .wrap {
+        max-width: 960px;
+        margin: 0 auto;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        padding: 1rem;
+      }
+
+      h1 {
+        margin: 0 0 0.3rem;
+        font-size: 1.5rem;
+        font-family: "IBM Plex Serif", Georgia, serif;
+      }
+
+      p {
+        margin: 0 0 0.7rem;
+        color: var(--muted);
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 440px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 0.9rem;
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        background: #fffaf2;
+        color: var(--ink);
+        resize: vertical;
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        margin-top: 0.8rem;
+      }
+
+      button {
+        border: 1px solid #0a4256;
+        border-radius: 10px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 600;
+        padding: 0.58rem 0.9rem;
+        cursor: pointer;
+      }
+
+      button:hover {
+        filter: brightness(1.05);
+      }
+
+      .status {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="card">
+        <h1>WORK OpenClaw Validation Prompt</h1>
+        <p>
+          Copy this message and send it to your WORK OpenClaw instance. It includes repo
+          identification, non-destructive constraints, and the exact feedback format we need.
+        </p>
+        <textarea id="prompt" readonly>
+You are validating Agent Orchestrator PR #403 work from my teammate. Please run this safely and report evidence.
+
+Repository and target:
+- Repo: ComposioHQ/agent-orchestrator
+- Local path: /home/lifeos/.worktrees/ao/ao-22
+- Branch to validate: feat/399
+- Expected latest commit should include docs/reviews/ao22-pr403-confidence-checklist.md
+- Scope: feedback tools (bug_report + improvement_suggestion) contracts/validation/storage/dedupe
+
+Safety and non-destructive constraints (hard requirements):
+- Do NOT stop, reset, delete, or clean existing AO/OpenClaw sessions.
+- Do NOT run destructive commands (no ao cleanup, no tmux kill-server, no rm -rf on ~/.agent-orchestrator or ~/.openclaw, no git reset --hard).
+- Do NOT alter existing project configuration beyond temporary isolated test profile/workdir.
+- Run validation in isolated temp paths (for example /tmp/pr403-work-dogfood) and leave existing orchestrator sessions untouched.
+
+Validation to perform:
+1) Confirm repo/branch/commit context.
+2) Build and run focused tests for feedback tools in @composio/ao-core.
+3) Run a non-repo-cwd smoke flow that persists:
+   - one bug_report
+   - one improvement_suggestion
+   - one duplicate replay variant of bug_report (case/order/whitespace changes)
+4) Validate list/read round trip and on-disk .kv artifacts.
+5) Validate negative cases:
+   - invalid confidence rejected
+   - missing required field rejected
+   - malformed report file handling (should skip invalid entry, keep valid entries)
+6) Validate dedupe determinism:
+   - duplicate replay should have same dedupe key
+   - different semantic payload should have different dedupe key
+
+Output requirements (must include):
+- Exact commands run (copy-pasteable).
+- Raw outputs for each command.
+- Expected vs actual per block.
+- PASS/FAIL per block:
+  1) schema/contract
+  2) persistence resilience
+  3) dedupe determinism
+  4) operator smoke
+  5) negative tests
+- Environment prerequisites discovered (keys, binaries, profile assumptions).
+- Residual risk list.
+- Final recommendation: MERGE or HOLD.
+
+Important:
+- If any validation step cannot run, mark it clearly as NOT-POSSIBLE and explain why with exact error output.
+- Prioritize factual evidence over summaries.
+        </textarea>
+        <div class="actions">
+          <button id="copyBtn" type="button">Copy Prompt</button>
+          <span class="status" id="copyStatus">Ready to copy</span>
+        </div>
+      </section>
+    </main>
+    <script>
+      const copyBtn = document.getElementById("copyBtn");
+      const copyStatus = document.getElementById("copyStatus");
+      const promptEl = document.getElementById("prompt");
+
+      async function copyPrompt() {
+        const text = promptEl.value;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            promptEl.focus();
+            promptEl.select();
+            document.execCommand("copy");
+          }
+          copyStatus.textContent = "Copied";
+        } catch {
+          copyStatus.textContent = "Copy failed - select text manually";
+        }
+      }
+
+      copyBtn.addEventListener("click", copyPrompt);
+    </script>
+  </body>
+</html>
