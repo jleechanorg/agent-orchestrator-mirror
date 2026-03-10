@@ -163,7 +163,7 @@ export async function escalateSession(
       sessionId,
       action: "escalate",
       requiresManualIntervention: true,
-      reason: `Exceeded max recovery attempts (${context.recoveryConfig.maxRecoveryAttempts})`,
+      reason,
     };
   }
 

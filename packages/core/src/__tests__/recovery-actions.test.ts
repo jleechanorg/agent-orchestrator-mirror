@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { readMetadataRaw } from "../metadata.js";
 import { getSessionsDir } from "../paths.js";
-import { recoverSession } from "../recovery/actions.js";
+import { escalateSession, recoverSession } from "../recovery/actions.js";
 import {
   DEFAULT_RECOVERY_CONFIG,
   type RecoveryAssessment,
@@ -151,5 +151,37 @@ describe("recoverSession", () => {
     expect(result.success).toBe(true);
     expect(result.action).toBe("escalate");
     expect(result.reason).toBe("Exceeded max recovery attempts (3)");
+  });
+});
+
+describe("escalateSession", () => {
+  let rootDir: string;
+
+  afterEach(() => {
+    if (rootDir) {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the assessment reason during dry runs", async () => {
+    rootDir = join(tmpdir(), `ao-recovery-${randomUUID()}`);
+    mkdirSync(rootDir, { recursive: true });
+    mkdirSync(join(rootDir, "project"), { recursive: true });
+    writeFileSync(join(rootDir, "agent-orchestrator.yaml"), "projects: {}\n", "utf-8");
+
+    const config = makeConfig(rootDir);
+    const registry = makeRegistry();
+    const assessment = makeAssessment({
+      action: "escalate",
+      classification: "partial",
+      reason: "Workspace exists but runtime is missing",
+    });
+    const context = makeContext(rootDir, { dryRun: true });
+
+    const result = await escalateSession(assessment, config, registry, context);
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("escalate");
+    expect(result.reason).toBe("Workspace exists but runtime is missing");
   });
 });
