@@ -8,6 +8,7 @@ import {
   enrichSessionsMetadata,
   computeStats,
 } from "@/lib/serialize";
+import { resolveGlobalPause } from "@/lib/global-pause";
 import { matchesProject } from "@/lib/project-utils";
 
 const METADATA_ENRICH_TIMEOUT_MS = 3_000;
@@ -108,6 +109,7 @@ export async function GET(request: Request) {
       sessions: dashboardSessions,
       stats: computeStats(dashboardSessions),
       orchestratorId,
+      globalPause: resolveGlobalPause(coreSessions),
     });
   } catch (err) {
     return NextResponse.json(

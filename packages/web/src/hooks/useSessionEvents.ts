@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import type { DashboardSession, GlobalPauseState, SSESnapshotEvent } from "@/lib/types";
 
 interface State {
@@ -54,6 +54,12 @@ export function useSessionEvents(
     sessions: initialSessions,
     globalPause: initialGlobalPause ?? null,
   });
+  const sessionsRef = useRef(state.sessions);
+  const refreshingRef = useRef(false);
+
+  useEffect(() => {
+    sessionsRef.current = state.sessions;
+  }, [state.sessions]);
 
   useEffect(() => {
     dispatch({ type: "reset", sessions: initialSessions, globalPause: initialGlobalPause ?? null });
@@ -70,14 +76,35 @@ export function useSessionEvents(
           const snapshot = data as SSESnapshotEvent;
           dispatch({ type: "snapshot", patches: snapshot.sessions });
 
-          // Fetch updated globalPause state when membership changes
-          const sessionsUrl = project
-            ? `/api/sessions?project=${encodeURIComponent(project)}`
-            : "/api/sessions";
-          const res = await fetch(sessionsUrl);
-          if (res.ok) {
-            const updated = await res.json();
-            dispatch({ type: "updatePause", globalPause: updated.globalPause ?? null });
+          const currentIds = new Set(sessionsRef.current.map((s) => s.id));
+          const snapshotIds = new Set(snapshot.sessions.map((s) => s.id));
+          const sameMembership =
+            currentIds.size === snapshotIds.size &&
+            [...snapshotIds].every((id) => currentIds.has(id));
+
+          if (!sameMembership && !refreshingRef.current) {
+            refreshingRef.current = true;
+            const sessionsUrl = project
+              ? `/api/sessions?project=${encodeURIComponent(project)}`
+              : "/api/sessions";
+            void fetch(sessionsUrl)
+              .then((res) => (res.ok ? res.json() : null))
+              .then(
+                (
+                  updated: { sessions?: DashboardSession[]; globalPause?: GlobalPauseState } | null,
+                ) => {
+                  if (updated?.sessions) {
+                    dispatch({
+                      type: "reset",
+                      sessions: updated.sessions,
+                      globalPause: updated.globalPause ?? null,
+                    });
+                  }
+                },
+              )
+              .finally(() => {
+                refreshingRef.current = false;
+              });
           }
         }
       } catch {

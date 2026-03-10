@@ -14,6 +14,7 @@ import {
 import { prCache, prCacheKey } from "@/lib/cache";
 import { getPrimaryProjectId, getProjectName, getAllProjects } from "@/lib/project-name";
 import { matchesProject } from "@/lib/project-utils";
+import { resolveGlobalPause, type GlobalPauseState } from "@/lib/global-pause";
 
 export async function generateMetadata(): Promise<Metadata> {
   const projectName = getProjectName();
@@ -24,6 +25,7 @@ export default async function Home(props: { searchParams: Promise<{ project?: st
   const searchParams = await props.searchParams;
   let sessions: DashboardSession[] = [];
   let orchestratorId: string | null = null;
+  let globalPause: GlobalPauseState | null = null;
   const defaultProjectId = getPrimaryProjectId();
   // Allow ?project=all to show all sessions (for multi-project setups)
   const projectFilter = searchParams.project ?? defaultProjectId;
@@ -45,6 +47,8 @@ export default async function Home(props: { searchParams: Promise<{ project?: st
         orchestratorId = orchSession.id;
       }
     }
+
+    globalPause = resolveGlobalPause(allSessions);
 
     let coreSessions = allSessions.filter((s) => !s.id.endsWith("-orchestrator"));
 
@@ -108,6 +112,7 @@ export default async function Home(props: { searchParams: Promise<{ project?: st
   } catch {
     sessions = [];
     orchestratorId = null;
+    globalPause = null;
   }
 
   const projectName = getProjectName();
@@ -121,6 +126,7 @@ export default async function Home(props: { searchParams: Promise<{ project?: st
       projectId={projectFilter === "all" ? undefined : projectFilter}
       projectName={projectName}
       projects={projects}
+      initialGlobalPause={globalPause}
     />
   );
 }
