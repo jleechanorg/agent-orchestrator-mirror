@@ -77,7 +77,12 @@ export async function recoverSession(
         : null,
       workspacePath: rawMetadata["worktree"] || null,
       runtimeHandle: assessment.runtimeHandle,
-      agentInfo: null,
+      agentInfo: rawMetadata["summary"]
+        ? {
+            summary: rawMetadata["summary"],
+            agentSessionId: null,
+          }
+        : null,
       createdAt: rawMetadata["createdAt"] ? new Date(rawMetadata["createdAt"]) : new Date(),
       lastActivityAt: new Date(),
       restoredAt: new Date(now),
