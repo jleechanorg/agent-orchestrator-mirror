@@ -37,8 +37,8 @@ export async function generateMetadata(props: {
 export default async function Home(props: { searchParams: Promise<{ project?: string }> }) {
   const searchParams = await props.searchParams;
   let sessions: DashboardSession[] = [];
-  let orchestratorId: string | null;
-  let globalPause: GlobalPauseState | null;
+  let orchestratorId: string | null = null;
+  let globalPause: GlobalPauseState | null = null;
   // Allow ?project=all to show all sessions (for multi-project setups)
   const projectFilter = searchParams.project ?? getPrimaryProjectId();
 
@@ -105,11 +105,7 @@ export default async function Home(props: { searchParams: Promise<{ project?: st
     });
     const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 4_000));
     await Promise.race([Promise.allSettled(enrichPromises), enrichTimeout]);
-  } catch {
-    sessions = [];
-    orchestratorId = null;
-    globalPause = null;
-  }
+  } catch {}
 
   const projectName = getSelectedProjectName(projectFilter);
   const projects = getAllProjects();
