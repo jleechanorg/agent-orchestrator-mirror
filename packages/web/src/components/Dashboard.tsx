@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   type DashboardSession,
   type DashboardStats,
@@ -14,6 +14,7 @@ import { AttentionZone } from "./AttentionZone";
 import { PRTableRow } from "./PRStatus";
 import { DynamicFavicon } from "./DynamicFavicon";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
+import type { ObservabilitySummary } from "@composio/ao-core";
 
 interface DashboardProps {
   initialSessions: DashboardSession[];
@@ -25,8 +26,36 @@ interface DashboardProps {
 const KANBAN_LEVELS = ["working", "pending", "review", "respond", "merge"] as const;
 
 export function Dashboard({ initialSessions, stats, orchestratorId, projectName }: DashboardProps) {
-  const sessions = useSessionEvents(initialSessions);
+  const streamState = useSessionEvents(initialSessions);
+  const sessions = streamState.sessions;
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
+  const [observability, setObservability] = useState<ObservabilitySummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadObservability = async () => {
+      try {
+        const response = await fetch("/api/observability", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = (await response.json()) as ObservabilitySummary;
+        if (!cancelled) {
+          setObservability(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setObservability(null);
+        }
+      }
+    };
+
+    void loadObservability();
+    const interval = setInterval(() => void loadObservability(), 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
   const grouped = useMemo(() => {
     const zones: Record<AttentionLevel, DashboardSession[]> = {
       merge: [],
@@ -112,30 +141,50 @@ export function Dashboard({ initialSessions, stats, orchestratorId, projectName 
           >
             <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
             orchestrator
-            <svg className="h-3 w-3 opacity-70" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg
+              className="h-3 w-3 opacity-70"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
               <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
             </svg>
           </a>
         )}
       </div>
 
+      <ObservabilityBanner summary={observability} streamState={streamState} />
+
       {/* Rate limit notice */}
       {anyRateLimited && !rateLimitDismissed && (
         <div className="mb-6 flex items-center gap-2.5 rounded border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.05)] px-3.5 py-2.5 text-[11px] text-[var(--color-status-attention)]">
-          <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg
+            className="h-3.5 w-3.5 shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
             <circle cx="12" cy="12" r="10" />
             <path d="M12 8v4M12 16h.01" />
           </svg>
           <span className="flex-1">
-            GitHub API rate limited — PR data (CI status, review state, sizes) may be stale.
-            {" "}Will retry automatically on next refresh.
+            GitHub API rate limited — PR data (CI status, review state, sizes) may be stale. Will
+            retry automatically on next refresh.
           </span>
           <button
             onClick={() => setRateLimitDismissed(true)}
             className="ml-1 shrink-0 opacity-60 hover:opacity-100"
             aria-label="Dismiss"
           >
-            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg
+              className="h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
               <path d="M18 6 6 18M6 6l12 12" />
             </svg>
           </button>
@@ -221,6 +270,67 @@ export function Dashboard({ initialSessions, stats, orchestratorId, projectName 
   );
 }
 
+function ObservabilityBanner({
+  summary,
+  streamState,
+}: {
+  summary: ObservabilitySummary | null;
+  streamState: ReturnType<typeof useSessionEvents>;
+}) {
+  const latestFailure = summary
+    ? Object.values(summary.projects)
+        .flatMap((project) => project.recentTraces)
+        .filter((trace) => trace.outcome === "failure")
+        .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0]
+    : undefined;
+
+  const overallStatus = summary?.overallStatus ?? "warn";
+  const tone =
+    overallStatus === "error"
+      ? "rgba(248,81,73,0.07)"
+      : overallStatus === "warn"
+        ? "rgba(245,158,11,0.07)"
+        : "rgba(34,197,94,0.07)";
+  const border =
+    overallStatus === "error"
+      ? "rgba(248,81,73,0.2)"
+      : overallStatus === "warn"
+        ? "rgba(245,158,11,0.2)"
+        : "rgba(34,197,94,0.2)";
+
+  return (
+    <div
+      className="mb-6 flex flex-wrap items-center gap-3 rounded border px-3.5 py-2.5 text-[11px]"
+      style={{ background: tone, borderColor: border }}
+    >
+      <span className="font-semibold text-[var(--color-text-primary)]">
+        observability {summary?.overallStatus ?? "loading"}
+      </span>
+      <span className="text-[var(--color-text-tertiary)]">
+        stream {streamState.connectionState}
+        {streamState.lastEventAt
+          ? ` · last event ${new Date(streamState.lastEventAt).toLocaleTimeString()}`
+          : ""}
+      </span>
+      {streamState.lastCorrelationId ? (
+        <span className="font-[var(--font-mono)] text-[var(--color-text-tertiary)]">
+          {streamState.lastCorrelationId}
+        </span>
+      ) : null}
+      {latestFailure ? (
+        <span className="text-[var(--color-text-secondary)]">
+          last failure: {latestFailure.operation}
+          {latestFailure.sessionId ? ` (${latestFailure.sessionId})` : ""}
+          {latestFailure.reason ? ` — ${latestFailure.reason}` : ""}
+        </span>
+      ) : null}
+      {streamState.lastError ? (
+        <span className="text-[var(--color-status-attention)]">{streamState.lastError}</span>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusLine({ stats }: { stats: DashboardStats }) {
   if (stats.totalSessions === 0) {
     return <span className="text-[13px] text-[var(--color-text-muted)]">no sessions</span>;
@@ -241,18 +351,14 @@ function StatusLine({ stats }: { stats: DashboardStats }) {
     <div className="flex items-baseline gap-0.5">
       {parts.map((p, i) => (
         <span key={p.label} className="flex items-baseline">
-          {i > 0 && (
-            <span className="mx-3 text-[11px] text-[var(--color-border-strong)]">·</span>
-          )}
+          {i > 0 && <span className="mx-3 text-[11px] text-[var(--color-border-strong)]">·</span>}
           <span
             className="text-[20px] font-bold tabular-nums tracking-tight"
             style={{ color: p.color ?? "var(--color-text-primary)" }}
           >
             {p.value}
           </span>
-          <span className="ml-1.5 text-[11px] text-[var(--color-text-muted)]">
-            {p.label}
-          </span>
+          <span className="ml-1.5 text-[11px] text-[var(--color-text-muted)]">{p.label}</span>
         </span>
       ))}
     </div>

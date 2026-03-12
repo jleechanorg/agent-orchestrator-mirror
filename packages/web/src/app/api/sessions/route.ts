@@ -1,5 +1,4 @@
 import { ACTIVITY_STATE } from "@composio/ao-core";
-import { NextResponse } from "next/server";
 import { getServices, getSCM } from "@/lib/services";
 import {
   sessionToDashboard,
@@ -8,6 +7,7 @@ import {
   enrichSessionsMetadata,
   computeStats,
 } from "@/lib/serialize";
+import { getCorrelationId, jsonWithCorrelation, recordApiObservation } from "@/lib/observability";
 
 const METADATA_ENRICH_TIMEOUT_MS = 3_000;
 const PR_ENRICH_TIMEOUT_MS = 4_000;
@@ -33,6 +33,8 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
  * - active=true: Only return non-exited sessions
  */
 export async function GET(request: Request) {
+  const correlationId = getCorrelationId(request);
+  const startedAt = Date.now();
   try {
     const { searchParams } = new URL(request.url);
     const activeOnly = searchParams.get("active") === "true";
@@ -84,15 +86,44 @@ export async function GET(request: Request) {
       }
     }
 
-    return NextResponse.json({
-      sessions: dashboardSessions,
-      stats: computeStats(dashboardSessions),
-      orchestratorId,
+    recordApiObservation({
+      config,
+      method: "GET",
+      path: "/api/sessions",
+      correlationId,
+      startedAt,
+      outcome: "success",
+      statusCode: 200,
+      data: { sessionCount: dashboardSessions.length, activeOnly },
     });
+
+    return jsonWithCorrelation(
+      {
+        sessions: dashboardSessions,
+        stats: computeStats(dashboardSessions),
+        orchestratorId,
+      },
+      { status: 200 },
+      correlationId,
+    );
   } catch (err) {
-    return NextResponse.json(
+    const { config } = await getServices().catch(() => ({ config: undefined }));
+    if (config) {
+      recordApiObservation({
+        config,
+        method: "GET",
+        path: "/api/sessions",
+        correlationId,
+        startedAt,
+        outcome: "failure",
+        statusCode: 500,
+        reason: err instanceof Error ? err.message : "Failed to list sessions",
+      });
+    }
+    return jsonWithCorrelation(
       { error: err instanceof Error ? err.message : "Failed to list sessions" },
       { status: 500 },
+      correlationId,
     );
   }
 }

@@ -1,6 +1,7 @@
 import { getServices } from "@/lib/services";
 import { sessionToDashboard } from "@/lib/serialize";
 import { getAttentionLevel } from "@/lib/types";
+import { createCorrelationId, createProjectObserver } from "@composio/ao-core";
 
 export const dynamic = "force-dynamic";
 
@@ -12,20 +13,54 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(): Promise<Response> {
   const encoder = new TextEncoder();
+  const correlationId = createCorrelationId("sse");
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let updates: ReturnType<typeof setInterval> | undefined;
+  let observerProjectId: string | undefined;
 
   const stream = new ReadableStream({
     start(controller) {
+      void (async () => {
+        try {
+          const { config } = await getServices();
+          observerProjectId = Object.keys(config.projects)[0];
+          if (observerProjectId) {
+            const observer = createProjectObserver(config, "web-events");
+            observer.recordOperation({
+              metric: "sse_connect",
+              operation: "sse.connect",
+              outcome: "success",
+              correlationId,
+              projectId: observerProjectId,
+              data: { path: "/api/events" },
+              level: "info",
+            });
+            observer.setHealth({
+              surface: "sse.events",
+              status: "ok",
+              projectId: observerProjectId,
+              correlationId,
+              details: { projectId: observerProjectId, connection: "open" },
+            });
+          }
+        } catch {
+          void 0;
+        }
+      })();
+
       // Send initial snapshot
       void (async () => {
         try {
-          const { sessionManager } = await getServices();
+          const { config, sessionManager } = await getServices();
           const sessions = await sessionManager.list();
           const dashboardSessions = sessions.map(sessionToDashboard);
+          const projectId = observerProjectId ?? Object.keys(config.projects)[0];
+          const observer = projectId ? createProjectObserver(config, "web-events") : null;
 
           const initialEvent = {
             type: "snapshot",
+            correlationId,
+            emittedAt: new Date().toISOString(),
             sessions: dashboardSessions.map((s) => ({
               id: s.id,
               status: s.status,
@@ -35,10 +70,23 @@ export async function GET(): Promise<Response> {
             })),
           };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialEvent)}\n\n`));
+          if (observer && projectId) {
+            observer.recordOperation({
+              metric: "sse_snapshot",
+              operation: "sse.snapshot",
+              outcome: "success",
+              correlationId,
+              projectId,
+              data: { sessionCount: dashboardSessions.length, initial: true },
+              level: "info",
+            });
+          }
         } catch {
           // If services aren't available, send empty snapshot
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ type: "snapshot", sessions: [] })}\n\n`),
+            encoder.encode(
+              `data: ${JSON.stringify({ type: "snapshot", correlationId, emittedAt: new Date().toISOString(), sessions: [] })}\n\n`,
+            ),
           );
         }
       })();
@@ -58,30 +106,59 @@ export async function GET(): Promise<Response> {
         void (async () => {
           let dashboardSessions;
           try {
-            const { sessionManager } = await getServices();
+            const { config, sessionManager } = await getServices();
             const sessions = await sessionManager.list();
             dashboardSessions = sessions.map(sessionToDashboard);
+            const projectId = observerProjectId ?? Object.keys(config.projects)[0];
+            const observer = projectId ? createProjectObserver(config, "web-events") : null;
+
+            if (observer && projectId) {
+              observer.setHealth({
+                surface: "sse.events",
+                status: "ok",
+                projectId,
+                correlationId,
+                details: {
+                  projectId,
+                  sessionCount: dashboardSessions.length,
+                  lastEventAt: new Date().toISOString(),
+                },
+              });
+            }
+
+            try {
+              const event = {
+                type: "snapshot",
+                correlationId,
+                emittedAt: new Date().toISOString(),
+                sessions: dashboardSessions.map((s) => ({
+                  id: s.id,
+                  status: s.status,
+                  activity: s.activity,
+                  attentionLevel: getAttentionLevel(s),
+                  lastActivityAt: s.lastActivityAt,
+                })),
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+              if (observer && projectId) {
+                observer.recordOperation({
+                  metric: "sse_snapshot",
+                  operation: "sse.snapshot",
+                  outcome: "success",
+                  correlationId,
+                  projectId,
+                  data: { sessionCount: dashboardSessions.length, initial: false },
+                  level: "info",
+                });
+              }
+            } catch {
+              // enqueue failure means the stream is closed — clean up both intervals
+              clearInterval(updates);
+              clearInterval(heartbeat);
+            }
           } catch {
             // Transient service error — skip this poll, retry on next interval
             return;
-          }
-
-          try {
-            const event = {
-              type: "snapshot",
-              sessions: dashboardSessions.map((s) => ({
-                id: s.id,
-                status: s.status,
-                activity: s.activity,
-                attentionLevel: getAttentionLevel(s),
-                lastActivityAt: s.lastActivityAt,
-              })),
-            };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-          } catch {
-            // enqueue failure means the stream is closed — clean up both intervals
-            clearInterval(updates);
-            clearInterval(heartbeat);
           }
         })();
       }, 5000);
@@ -89,6 +166,33 @@ export async function GET(): Promise<Response> {
     cancel() {
       clearInterval(heartbeat);
       clearInterval(updates);
+      void (async () => {
+        try {
+          const { config } = await getServices();
+          const projectId = observerProjectId ?? Object.keys(config.projects)[0];
+          if (!projectId) return;
+          const observer = createProjectObserver(config, "web-events");
+          observer.recordOperation({
+            metric: "sse_disconnect",
+            operation: "sse.disconnect",
+            outcome: "success",
+            correlationId,
+            projectId,
+            data: { path: "/api/events" },
+            level: "info",
+          });
+          observer.setHealth({
+            surface: "sse.events",
+            status: "warn",
+            projectId,
+            correlationId,
+            reason: "SSE connection closed",
+            details: { projectId, connection: "closed" },
+          });
+        } catch {
+          void 0;
+        }
+      })();
     },
   });
 

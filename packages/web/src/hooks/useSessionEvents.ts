@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import type { DashboardSession, SSESnapshotEvent } from "@/lib/types";
 
 type Action =
@@ -25,15 +25,34 @@ function reducer(state: DashboardSession[], action: Action): DashboardSession[] 
           return s;
         }
         changed = true;
-        return { ...s, status: patch.status, activity: patch.activity, lastActivityAt: patch.lastActivityAt };
+        return {
+          ...s,
+          status: patch.status,
+          activity: patch.activity,
+          lastActivityAt: patch.lastActivityAt,
+        };
       });
       return changed ? next : state;
     }
   }
 }
 
-export function useSessionEvents(initialSessions: DashboardSession[]): DashboardSession[] {
+export interface SessionEventStreamState {
+  sessions: DashboardSession[];
+  connectionState: "connecting" | "connected" | "error";
+  lastEventAt: string | null;
+  lastCorrelationId: string | null;
+  lastError: string | null;
+}
+
+export function useSessionEvents(initialSessions: DashboardSession[]): SessionEventStreamState {
   const [sessions, dispatch] = useReducer(reducer, initialSessions);
+  const [connectionState, setConnectionState] = useState<"connecting" | "connected" | "error">(
+    "connecting",
+  );
+  const [lastEventAt, setLastEventAt] = useState<string | null>(null);
+  const [lastCorrelationId, setLastCorrelationId] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   // Reset state when server-rendered props change (e.g. full page refresh)
   useEffect(() => {
@@ -42,6 +61,7 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
 
   useEffect(() => {
     const es = new EventSource("/api/events");
+    setConnectionState("connecting");
 
     es.onmessage = (event: MessageEvent) => {
       try {
@@ -49,6 +69,10 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
         if (data.type === "snapshot") {
           const snapshot = data as SSESnapshotEvent;
           dispatch({ type: "snapshot", patches: snapshot.sessions });
+          setConnectionState("connected");
+          setLastEventAt(snapshot.emittedAt ?? new Date().toISOString());
+          setLastCorrelationId(snapshot.correlationId ?? null);
+          setLastError(null);
         }
       } catch {
         // Ignore malformed messages
@@ -56,7 +80,8 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
     };
 
     es.onerror = () => {
-      // EventSource auto-reconnects; nothing to do here
+      setConnectionState("error");
+      setLastError("Event stream reconnecting");
     };
 
     return () => {
@@ -64,5 +89,11 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
     };
   }, []);
 
-  return sessions;
+  return {
+    sessions,
+    connectionState,
+    lastEventAt,
+    lastCorrelationId,
+    lastError,
+  };
 }

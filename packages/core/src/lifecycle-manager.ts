@@ -35,6 +35,7 @@ import {
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
+import { createCorrelationId, createProjectObserver } from "./observability.js";
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
 function parseDuration(str: string): number {
@@ -156,6 +157,21 @@ function eventToReactionKey(eventType: EventType): string | null {
   }
 }
 
+function transitionLogLevel(status: SessionStatus): "info" | "warn" | "error" {
+  const eventType = statusToEventType(undefined, status);
+  if (!eventType) {
+    return "info";
+  }
+  const priority = inferPriority(eventType);
+  if (priority === "urgent") {
+    return "error";
+  }
+  if (priority === "warning") {
+    return "warn";
+  }
+  return "info";
+}
+
 export interface LifecycleManagerDeps {
   config: OrchestratorConfig;
   registry: PluginRegistry;
@@ -173,6 +189,7 @@ interface ReactionTracker {
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
   const { config, registry, sessionManager, projectId: scopedProjectId } = deps;
+  const observer = createProjectObserver(config, "lifecycle-manager");
 
   const states = new Map<SessionId, SessionStatus>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
@@ -436,10 +453,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     return reactionConfig ? (reactionConfig as ReactionConfig) : null;
   }
 
-  function updateSessionMetadata(
-    session: Session,
-    updates: Partial<Record<string, string>>,
-  ): void {
+  function updateSessionMetadata(session: Session, updates: Partial<Record<string, string>>): void {
     const project = config.projects[session.projectId];
     if (!project) return;
 
@@ -511,9 +525,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // --- Pending (human) review comments ---
     // null = SCM fetch failed; skip processing to preserve existing metadata.
     if (pendingComments === null) {
-      console.debug(
-        `[ao lifecycle] Pending comments fetch failed for ${session.id}, preserving existing metadata`,
-      );
+      void 0;
     }
     if (pendingComments !== null) {
       const pendingFingerprint = makeFingerprint(pendingComments.map((comment) => comment.id));
@@ -577,17 +589,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // --- Automated (bot) review comments ---
     if (automatedComments === null) {
-      console.debug(
-        `[ao lifecycle] Automated comments fetch failed for ${session.id}, preserving existing metadata`,
-      );
+      void 0;
     }
     if (automatedComments !== null) {
-      const automatedFingerprint = makeFingerprint(
-        automatedComments.map((comment) => comment.id),
-      );
+      const automatedFingerprint = makeFingerprint(automatedComments.map((comment) => comment.id));
       const lastAutomatedFingerprint = session.metadata["lastAutomatedReviewFingerprint"] ?? "";
-      const lastAutomatedDispatchHash =
-        session.metadata["lastAutomatedReviewDispatchHash"] ?? "";
+      const lastAutomatedDispatchHash = session.metadata["lastAutomatedReviewDispatchHash"] ?? "";
 
       if (automatedFingerprint !== lastAutomatedFingerprint) {
         clearReactionTracker(session.id, automatedReactionKey);
@@ -656,9 +663,20 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     let transitionReaction: { key: string; result: ReactionResult | null } | undefined;
 
     if (newStatus !== oldStatus) {
+      const correlationId = createCorrelationId("lifecycle-transition");
       // State transition detected
       states.set(session.id, newStatus);
       updateSessionMetadata(session, { status: newStatus });
+      observer.recordOperation({
+        metric: "lifecycle_poll",
+        operation: "lifecycle.transition",
+        outcome: "success",
+        correlationId,
+        projectId: session.projectId,
+        sessionId: session.id,
+        data: { oldStatus, newStatus },
+        level: transitionLogLevel(newStatus),
+      });
 
       // Reset allCompleteEmitted when any session becomes active again
       if (newStatus !== "merged" && newStatus !== "killed") {
@@ -726,6 +744,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
   /** Run one polling cycle across all sessions. */
   async function pollAll(): Promise<void> {
+    const correlationId = createCorrelationId("lifecycle-poll");
+    const startedAt = Date.now();
     // Re-entrancy guard: skip if previous poll is still running
     if (polling) return;
     polling = true;
@@ -776,8 +796,50 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           }
         }
       }
+      if (scopedProjectId) {
+        observer.recordOperation({
+          metric: "lifecycle_poll",
+          operation: "lifecycle.poll",
+          outcome: "success",
+          correlationId,
+          projectId: scopedProjectId,
+          durationMs: Date.now() - startedAt,
+          data: { sessionCount: sessions.length, activeSessionCount: activeSessions.length },
+          level: "info",
+        });
+        observer.setHealth({
+          surface: "lifecycle.worker",
+          status: "ok",
+          projectId: scopedProjectId,
+          correlationId,
+          details: {
+            projectId: scopedProjectId,
+            sessionCount: sessions.length,
+            activeSessionCount: activeSessions.length,
+          },
+        });
+      }
     } catch (err) {
-      console.error("[ao lifecycle] Poll cycle failed:", err);
+      if (scopedProjectId) {
+        observer.recordOperation({
+          metric: "lifecycle_poll",
+          operation: "lifecycle.poll",
+          outcome: "failure",
+          correlationId,
+          projectId: scopedProjectId,
+          durationMs: Date.now() - startedAt,
+          reason: err instanceof Error ? err.message : String(err),
+          level: "error",
+        });
+        observer.setHealth({
+          surface: "lifecycle.worker",
+          status: "error",
+          projectId: scopedProjectId,
+          correlationId,
+          reason: err instanceof Error ? err.message : String(err),
+          details: { projectId: scopedProjectId },
+        });
+      }
     } finally {
       polling = false;
     }

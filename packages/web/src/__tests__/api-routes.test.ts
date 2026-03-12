@@ -170,6 +170,7 @@ import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
 import { POST as remapPOST } from "@/app/api/sessions/[id]/remap/route";
 import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
 import { GET as eventsGET } from "@/app/api/events/route";
+import { GET as observabilityGET } from "@/app/api/observability/route";
 
 function makeRequest(url: string, init?: RequestInit): NextRequest {
   return new NextRequest(
@@ -256,6 +257,7 @@ describe("API Routes", () => {
       expect(data.session).toBeDefined();
       expect(data.session.projectId).toBe("my-app");
       expect(data.session.status).toBe("spawning");
+      expect(res.headers.get("x-correlation-id")).toBeTruthy();
     });
 
     it("returns 400 when projectId is missing", async () => {
@@ -572,10 +574,24 @@ describe("API Routes", () => {
       const jsonStr = text.replace("data: ", "").trim();
       const event = JSON.parse(jsonStr);
       expect(event.type).toBe("snapshot");
+      expect(event.correlationId).toBeTruthy();
       expect(Array.isArray(event.sessions)).toBe(true);
       expect(event.sessions.length).toBeGreaterThan(0);
       expect(event.sessions[0]).toHaveProperty("id");
       expect(event.sessions[0]).toHaveProperty("attentionLevel");
+    });
+  });
+
+  describe("GET /api/observability", () => {
+    it("returns observability summary with correlation header", async () => {
+      const req = makeRequest("/api/observability", { method: "GET" });
+      const res = await observabilityGET(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-correlation-id")).toBeTruthy();
+      const data = await res.json();
+      expect(data).toHaveProperty("generatedAt");
+      expect(data).toHaveProperty("overallStatus");
+      expect(data).toHaveProperty("projects");
     });
   });
 });

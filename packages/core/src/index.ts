@@ -64,6 +64,26 @@ export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from 
 export { asValidOpenCodeSessionId } from "./opencode-session-id.js";
 export { normalizeOrchestratorSessionStrategy } from "./orchestrator-session-strategy.js";
 export type { NormalizedOrchestratorSessionStrategy } from "./orchestrator-session-strategy.js";
+export {
+  createCorrelationId,
+  createProjectObserver,
+  readObservabilitySummary,
+} from "./observability.js";
+export type {
+  ObservabilityHealthStatus,
+  ObservabilityHealthSurface,
+  ObservabilityLevel,
+  ObservabilityMetricCounter,
+  ObservabilityMetricName,
+  ObservabilityOutcome,
+  ObservabilityProjectSnapshot,
+  ObservabilitySessionStatus,
+  ObservabilitySummary,
+  ObservabilityTraceRecord,
+  ProjectObserver,
+  RecordOperationInput,
+  SetHealthInput,
+} from "./observability.js";
 
 // Path utilities — hash-based directory structure
 export {
@@ -78,6 +98,7 @@ export {
   getOriginFilePath,
   generateSessionName,
   generateTmuxName,
+  getObservabilityBaseDir,
   parseTmuxName,
   expandHome,
   validateAndStoreOrigin,

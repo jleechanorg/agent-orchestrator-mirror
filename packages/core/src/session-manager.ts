@@ -65,6 +65,7 @@ import {
 } from "./paths.js";
 import { asValidOpenCodeSessionId } from "./opencode-session-id.js";
 import { normalizeOrchestratorSessionStrategy } from "./orchestrator-session-strategy.js";
+import { createCorrelationId, createProjectObserver } from "./observability.js";
 
 const execFileAsync = promisify(execFile);
 const OPENCODE_DISCOVERY_TIMEOUT_MS = 2_000;
@@ -274,6 +275,32 @@ export interface SessionManagerDeps {
 /** Create a SessionManager instance. */
 export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionManager {
   const { config, registry } = deps;
+  const observer = createProjectObserver(config, "session-manager");
+
+  function recordOperation(input: {
+    metric: "spawn" | "restore" | "kill" | "cleanup" | "send" | "claim_pr";
+    operation: string;
+    outcome: "success" | "failure";
+    correlationId: string;
+    projectId?: string;
+    sessionId?: SessionId;
+    startedAt: number;
+    reason?: string;
+    data?: Record<string, unknown>;
+  }): void {
+    observer.recordOperation({
+      metric: input.metric,
+      operation: input.operation,
+      outcome: input.outcome,
+      correlationId: input.correlationId,
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      reason: input.reason,
+      durationMs: Date.now() - input.startedAt,
+      data: input.data,
+      level: input.outcome === "failure" ? "error" : "info",
+    });
+  }
 
   interface LocatedSession {
     raw: Record<string, string>;
@@ -611,132 +638,235 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
   // Define methods as local functions so `this` is not needed
   async function spawn(spawnConfig: SessionSpawnConfig): Promise<Session> {
+    const correlationId = createCorrelationId("spawn");
+    const startedAt = Date.now();
+    let observedSessionId: SessionId | undefined;
     const project = config.projects[spawnConfig.projectId];
     if (!project) {
+      recordOperation({
+        metric: "spawn",
+        operation: "session.spawn",
+        outcome: "failure",
+        correlationId,
+        projectId: spawnConfig.projectId,
+        startedAt,
+        reason: `Unknown project: ${spawnConfig.projectId}`,
+        data: { issueId: spawnConfig.issueId },
+      });
       throw new Error(`Unknown project: ${spawnConfig.projectId}`);
     }
 
-    const plugins = resolvePlugins(project);
-    if (!plugins.runtime) {
-      throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
-    }
-
-    // Allow --agent override to swap the agent plugin for this session
-    if (spawnConfig.agent) {
-      const overrideAgent = registry.get<Agent>("agent", spawnConfig.agent);
-      if (!overrideAgent) {
-        throw new Error(`Agent plugin '${spawnConfig.agent}' not found`);
+    try {
+      const plugins = resolvePlugins(project);
+      if (!plugins.runtime) {
+        throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
       }
-      plugins.agent = overrideAgent;
-    }
 
-    if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
-    }
+      // Allow --agent override to swap the agent plugin for this session
+      if (spawnConfig.agent) {
+        const overrideAgent = registry.get<Agent>("agent", spawnConfig.agent);
+        if (!overrideAgent) {
+          throw new Error(`Agent plugin '${spawnConfig.agent}' not found`);
+        }
+        plugins.agent = overrideAgent;
+      }
 
-    // Validate issue exists BEFORE creating any resources
-    let resolvedIssue: Issue | undefined;
-    if (spawnConfig.issueId && plugins.tracker) {
-      try {
-        // Fetch and validate the issue exists
-        resolvedIssue = await plugins.tracker.getIssue(spawnConfig.issueId, project);
-      } catch (err) {
-        // Issue fetch failed - determine why
-        if (isIssueNotFoundError(err)) {
-          // Ad-hoc issue string — proceed without tracker context.
-          // Branch will be generated as feat/{issueId} (line 329-331)
-        } else {
-          // Other error (auth, network, etc) - fail fast
-          throw new Error(`Failed to fetch issue ${spawnConfig.issueId}: ${err}`, { cause: err });
+      if (!plugins.agent) {
+        throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      }
+
+      // Validate issue exists BEFORE creating any resources
+      let resolvedIssue: Issue | undefined;
+      if (spawnConfig.issueId && plugins.tracker) {
+        try {
+          // Fetch and validate the issue exists
+          resolvedIssue = await plugins.tracker.getIssue(spawnConfig.issueId, project);
+        } catch (err) {
+          // Issue fetch failed - determine why
+          if (isIssueNotFoundError(err)) {
+            // Ad-hoc issue string — proceed without tracker context.
+            // Branch will be generated as feat/{issueId} (line 329-331)
+          } else {
+            // Other error (auth, network, etc) - fail fast
+            throw new Error(`Failed to fetch issue ${spawnConfig.issueId}: ${err}`, { cause: err });
+          }
         }
       }
-    }
 
-    // Get the sessions directory for this project
-    const sessionsDir = getProjectSessionsDir(project);
+      // Get the sessions directory for this project
+      const sessionsDir = getProjectSessionsDir(project);
 
-    // Validate and store .origin file (new architecture only)
-    if (config.configPath) {
-      validateAndStoreOrigin(config.configPath, project.path);
-    }
+      // Validate and store .origin file (new architecture only)
+      if (config.configPath) {
+        validateAndStoreOrigin(config.configPath, project.path);
+      }
 
-    // Determine session ID — atomically reserve to prevent concurrent collisions
-    const existingSessions = listMetadata(sessionsDir);
-    let num = getNextSessionNumber(existingSessions, project.sessionPrefix);
-    let sessionId: string;
-    let tmuxName: string | undefined;
-    for (let attempts = 0; attempts < 10; attempts++) {
+      // Determine session ID — atomically reserve to prevent concurrent collisions
+      const existingSessions = listMetadata(sessionsDir);
+      let num = getNextSessionNumber(existingSessions, project.sessionPrefix);
+      let sessionId: string;
+      let tmuxName: string | undefined;
+      for (let attempts = 0; attempts < 10; attempts++) {
+        sessionId = `${project.sessionPrefix}-${num}`;
+        // Generate tmux name if using new architecture
+        if (config.configPath) {
+          tmuxName = generateTmuxName(config.configPath, project.sessionPrefix, num);
+        }
+        if (reserveSessionId(sessionsDir, sessionId)) break;
+        num++;
+        if (attempts === 9) {
+          throw new Error(
+            `Failed to reserve session ID after 10 attempts (prefix: ${project.sessionPrefix})`,
+          );
+        }
+      }
+      // Reassign to satisfy TypeScript's flow analysis (not redundant from compiler's perspective)
       sessionId = `${project.sessionPrefix}-${num}`;
-      // Generate tmux name if using new architecture
+      observedSessionId = sessionId;
       if (config.configPath) {
         tmuxName = generateTmuxName(config.configPath, project.sessionPrefix, num);
       }
-      if (reserveSessionId(sessionsDir, sessionId)) break;
-      num++;
-      if (attempts === 9) {
-        throw new Error(
-          `Failed to reserve session ID after 10 attempts (prefix: ${project.sessionPrefix})`,
-        );
+
+      // Determine branch name — explicit branch always takes priority
+      let branch: string;
+      if (spawnConfig.branch) {
+        branch = spawnConfig.branch;
+      } else if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
+        branch = plugins.tracker.branchName(spawnConfig.issueId, project);
+      } else if (spawnConfig.issueId) {
+        // If the issueId is already branch-safe (e.g. "INT-9999"), use as-is.
+        // Otherwise sanitize free-text (e.g. "fix login bug") into a valid slug.
+        const id = spawnConfig.issueId;
+        const isBranchSafe = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
+        const slug = isBranchSafe
+          ? id
+          : id
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .slice(0, 60)
+              .replace(/^-+|-+$/g, "");
+        branch = `feat/${slug || sessionId}`;
+      } else {
+        branch = `session/${sessionId}`;
       }
-    }
-    // Reassign to satisfy TypeScript's flow analysis (not redundant from compiler's perspective)
-    sessionId = `${project.sessionPrefix}-${num}`;
-    if (config.configPath) {
-      tmuxName = generateTmuxName(config.configPath, project.sessionPrefix, num);
-    }
 
-    // Determine branch name — explicit branch always takes priority
-    let branch: string;
-    if (spawnConfig.branch) {
-      branch = spawnConfig.branch;
-    } else if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
-      branch = plugins.tracker.branchName(spawnConfig.issueId, project);
-    } else if (spawnConfig.issueId) {
-      // If the issueId is already branch-safe (e.g. "INT-9999"), use as-is.
-      // Otherwise sanitize free-text (e.g. "fix login bug") into a valid slug.
-      const id = spawnConfig.issueId;
-      const isBranchSafe = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
-      const slug = isBranchSafe
-        ? id
-        : id
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .slice(0, 60)
-            .replace(/^-+|-+$/g, "");
-      branch = `feat/${slug || sessionId}`;
-    } else {
-      branch = `session/${sessionId}`;
-    }
+      // Create workspace (if workspace plugin is available)
+      let workspacePath = project.path;
+      if (plugins.workspace) {
+        try {
+          const wsInfo = await plugins.workspace.create({
+            projectId: spawnConfig.projectId,
+            project,
+            sessionId,
+            branch,
+          });
+          workspacePath = wsInfo.path;
 
-    // Create workspace (if workspace plugin is available)
-    let workspacePath = project.path;
-    if (plugins.workspace) {
-      try {
-        const wsInfo = await plugins.workspace.create({
-          projectId: spawnConfig.projectId,
-          project,
-          sessionId,
-          branch,
-        });
-        workspacePath = wsInfo.path;
-
-        // Run post-create hooks — clean up workspace on failure
-        if (plugins.workspace.postCreate) {
-          try {
-            await plugins.workspace.postCreate(wsInfo, project);
-          } catch (err) {
-            if (shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)) {
-              try {
-                await plugins.workspace.destroy(workspacePath);
-              } catch {
-                /* best effort */
+          // Run post-create hooks — clean up workspace on failure
+          if (plugins.workspace.postCreate) {
+            try {
+              await plugins.workspace.postCreate(wsInfo, project);
+            } catch (err) {
+              if (shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)) {
+                try {
+                  await plugins.workspace.destroy(workspacePath);
+                } catch {
+                  /* best effort */
+                }
               }
+              throw err;
             }
-            throw err;
+          }
+        } catch (err) {
+          // Clean up reserved session ID on workspace failure
+          try {
+            deleteMetadata(sessionsDir, sessionId, false);
+          } catch {
+            /* best effort */
+          }
+          throw err;
+        }
+      }
+
+      // Generate prompt with validated issue
+      let issueContext: string | undefined;
+      if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
+        try {
+          issueContext = await plugins.tracker.generatePrompt(spawnConfig.issueId, project);
+        } catch {
+          // Non-fatal: continue without detailed issue context
+          // Silently ignore errors - caller can check if issueContext is undefined
+        }
+      }
+
+      const composedPrompt = buildPrompt({
+        project,
+        projectId: spawnConfig.projectId,
+        issueId: spawnConfig.issueId,
+        issueContext,
+        userPrompt: spawnConfig.prompt,
+      });
+
+      // Get agent launch config and create runtime — clean up workspace on failure
+      const opencodeIssueSessionStrategy = project.opencodeIssueSessionStrategy ?? "reuse";
+      const reusedOpenCodeSessionId =
+        plugins.agent.name === "opencode" && spawnConfig.issueId
+          ? await resolveOpenCodeSessionReuse({
+              sessionsDir,
+              criteria: { issueId: spawnConfig.issueId },
+              strategy: opencodeIssueSessionStrategy,
+            })
+          : undefined;
+      const configuredSubagent =
+        typeof project.agentConfig?.["subagent"] === "string"
+          ? project.agentConfig["subagent"]
+          : undefined;
+
+      const agentLaunchConfig = {
+        sessionId,
+        projectConfig: {
+          ...project,
+          agentConfig: {
+            ...(project.agentConfig ?? {}),
+            ...(reusedOpenCodeSessionId ? { opencodeSessionId: reusedOpenCodeSessionId } : {}),
+          },
+        },
+        issueId: spawnConfig.issueId,
+        prompt: composedPrompt,
+        permissions: project.agentConfig?.permissions,
+        model: project.agentConfig?.model,
+        subagent: spawnConfig.subagent ?? configuredSubagent,
+      };
+
+      let handle: RuntimeHandle;
+      try {
+        const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
+        const environment = plugins.agent.getEnvironment(agentLaunchConfig);
+
+        handle = await plugins.runtime.create({
+          sessionId: tmuxName ?? sessionId, // Use tmux name for runtime if available
+          workspacePath,
+          launchCommand,
+          environment: {
+            ...environment,
+            AO_SESSION: sessionId,
+            AO_DATA_DIR: sessionsDir, // Pass sessions directory (not root dataDir)
+            AO_SESSION_NAME: sessionId, // User-facing session name
+            ...(tmuxName && { AO_TMUX_NAME: tmuxName }), // Tmux session name if using new arch
+          },
+        });
+      } catch (err) {
+        // Clean up workspace and reserved ID if agent config or runtime creation failed
+        if (
+          plugins.workspace &&
+          shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)
+        ) {
+          try {
+            await plugins.workspace.destroy(workspacePath);
+          } catch {
+            /* best effort */
           }
         }
-      } catch (err) {
-        // Clean up reserved session ID on workspace failure
         try {
           deleteMetadata(sessionsDir, sessionId, false);
         } catch {
@@ -744,190 +874,132 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         }
         throw err;
       }
-    }
 
-    // Generate prompt with validated issue
-    let issueContext: string | undefined;
-    if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
-      try {
-        issueContext = await plugins.tracker.generatePrompt(spawnConfig.issueId, project);
-      } catch {
-        // Non-fatal: continue without detailed issue context
-        // Silently ignore errors - caller can check if issueContext is undefined
-      }
-    }
-
-    const composedPrompt = buildPrompt({
-      project,
-      projectId: spawnConfig.projectId,
-      issueId: spawnConfig.issueId,
-      issueContext,
-      userPrompt: spawnConfig.prompt,
-    });
-
-    // Get agent launch config and create runtime — clean up workspace on failure
-    const opencodeIssueSessionStrategy = project.opencodeIssueSessionStrategy ?? "reuse";
-    const reusedOpenCodeSessionId =
-      plugins.agent.name === "opencode" && spawnConfig.issueId
-        ? await resolveOpenCodeSessionReuse({
-            sessionsDir,
-            criteria: { issueId: spawnConfig.issueId },
-            strategy: opencodeIssueSessionStrategy,
-          })
-        : undefined;
-    const configuredSubagent =
-      typeof project.agentConfig?.["subagent"] === "string"
-        ? project.agentConfig["subagent"]
-        : undefined;
-
-    const agentLaunchConfig = {
-      sessionId,
-      projectConfig: {
-        ...project,
-        agentConfig: {
-          ...(project.agentConfig ?? {}),
+      // Write metadata and run post-launch setup — clean up on failure
+      const session: Session = {
+        id: sessionId,
+        projectId: spawnConfig.projectId,
+        status: "spawning",
+        activity: "active",
+        branch,
+        issueId: spawnConfig.issueId ?? null,
+        pr: null,
+        workspacePath,
+        runtimeHandle: handle,
+        agentInfo: null,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        metadata: {
           ...(reusedOpenCodeSessionId ? { opencodeSessionId: reusedOpenCodeSessionId } : {}),
         },
-      },
-      issueId: spawnConfig.issueId,
-      prompt: composedPrompt,
-      permissions: project.agentConfig?.permissions,
-      model: project.agentConfig?.model,
-      subagent: spawnConfig.subagent ?? configuredSubagent,
-    };
+      };
 
-    let handle: RuntimeHandle;
-    try {
-      const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
-      const environment = plugins.agent.getEnvironment(agentLaunchConfig);
+      try {
+        writeMetadata(sessionsDir, sessionId, {
+          worktree: workspacePath,
+          branch,
+          status: "spawning",
+          tmuxName, // Store tmux name for mapping
+          issue: spawnConfig.issueId,
+          project: spawnConfig.projectId,
+          agent: plugins.agent.name, // Persist agent name for lifecycle manager
+          createdAt: new Date().toISOString(),
+          runtimeHandle: JSON.stringify(handle),
+          opencodeSessionId: reusedOpenCodeSessionId,
+        });
 
-      handle = await plugins.runtime.create({
-        sessionId: tmuxName ?? sessionId, // Use tmux name for runtime if available
-        workspacePath,
-        launchCommand,
-        environment: {
-          ...environment,
-          AO_SESSION: sessionId,
-          AO_DATA_DIR: sessionsDir, // Pass sessions directory (not root dataDir)
-          AO_SESSION_NAME: sessionId, // User-facing session name
-          ...(tmuxName && { AO_TMUX_NAME: tmuxName }), // Tmux session name if using new arch
+        if (plugins.agent.postLaunchSetup) {
+          await plugins.agent.postLaunchSetup(session);
+        }
+
+        if (
+          plugins.agent.name === "opencode" &&
+          opencodeIssueSessionStrategy === "reuse" &&
+          !session.metadata["opencodeSessionId"]
+        ) {
+          const discovered = await discoverOpenCodeSessionIdByTitle(
+            sessionId,
+            OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
+          );
+          if (discovered) {
+            session.metadata["opencodeSessionId"] = discovered;
+          }
+        }
+
+        if (Object.keys(session.metadata || {}).length > 0) {
+          updateMetadata(sessionsDir, sessionId, session.metadata);
+        }
+      } catch (err) {
+        // Clean up runtime and workspace on post-launch failure
+        try {
+          await plugins.runtime.destroy(handle);
+        } catch {
+          /* best effort */
+        }
+        if (
+          plugins.workspace &&
+          shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)
+        ) {
+          try {
+            await plugins.workspace.destroy(workspacePath);
+          } catch {
+            /* best effort */
+          }
+        }
+        try {
+          deleteMetadata(sessionsDir, sessionId, false);
+        } catch {
+          /* best effort */
+        }
+        throw err;
+      }
+
+      // Send initial prompt post-launch for agents that need it (e.g. Claude Code
+      // exits after -p, so we send the prompt after it starts in interactive mode).
+      // This is intentionally outside the try/catch above — a prompt delivery failure
+      // should NOT destroy the session. The agent is running; user can retry with `ao send`.
+      if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
+        try {
+          // Wait for agent to start and be ready for input
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+        } catch {
+          // Non-fatal: agent is running but didn't receive the initial prompt.
+          // User can retry with `ao send`.
+        }
+      }
+
+      recordOperation({
+        metric: "spawn",
+        operation: "session.spawn",
+        outcome: "success",
+        correlationId,
+        projectId: spawnConfig.projectId,
+        sessionId,
+        startedAt,
+        data: {
+          issueId: spawnConfig.issueId,
+          branch,
+          agent: plugins.agent.name,
+          workspacePath,
         },
       });
+
+      return session;
     } catch (err) {
-      // Clean up workspace and reserved ID if agent config or runtime creation failed
-      if (
-        plugins.workspace &&
-        shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)
-      ) {
-        try {
-          await plugins.workspace.destroy(workspacePath);
-        } catch {
-          /* best effort */
-        }
-      }
-      try {
-        deleteMetadata(sessionsDir, sessionId, false);
-      } catch {
-        /* best effort */
-      }
-      throw err;
-    }
-
-    // Write metadata and run post-launch setup — clean up on failure
-    const session: Session = {
-      id: sessionId,
-      projectId: spawnConfig.projectId,
-      status: "spawning",
-      activity: "active",
-      branch,
-      issueId: spawnConfig.issueId ?? null,
-      pr: null,
-      workspacePath,
-      runtimeHandle: handle,
-      agentInfo: null,
-      createdAt: new Date(),
-      lastActivityAt: new Date(),
-      metadata: {
-        ...(reusedOpenCodeSessionId ? { opencodeSessionId: reusedOpenCodeSessionId } : {}),
-      },
-    };
-
-    try {
-      writeMetadata(sessionsDir, sessionId, {
-        worktree: workspacePath,
-        branch,
-        status: "spawning",
-        tmuxName, // Store tmux name for mapping
-        issue: spawnConfig.issueId,
-        project: spawnConfig.projectId,
-        agent: plugins.agent.name, // Persist agent name for lifecycle manager
-        createdAt: new Date().toISOString(),
-        runtimeHandle: JSON.stringify(handle),
-        opencodeSessionId: reusedOpenCodeSessionId,
+      recordOperation({
+        metric: "spawn",
+        operation: "session.spawn",
+        outcome: "failure",
+        correlationId,
+        projectId: spawnConfig.projectId,
+        sessionId: observedSessionId,
+        startedAt,
+        reason: err instanceof Error ? err.message : String(err),
+        data: { issueId: spawnConfig.issueId, agentOverride: spawnConfig.agent },
       });
-
-      if (plugins.agent.postLaunchSetup) {
-        await plugins.agent.postLaunchSetup(session);
-      }
-
-      if (
-        plugins.agent.name === "opencode" &&
-        opencodeIssueSessionStrategy === "reuse" &&
-        !session.metadata["opencodeSessionId"]
-      ) {
-        const discovered = await discoverOpenCodeSessionIdByTitle(
-          sessionId,
-          OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
-        );
-        if (discovered) {
-          session.metadata["opencodeSessionId"] = discovered;
-        }
-      }
-
-      if (Object.keys(session.metadata || {}).length > 0) {
-        updateMetadata(sessionsDir, sessionId, session.metadata);
-      }
-    } catch (err) {
-      // Clean up runtime and workspace on post-launch failure
-      try {
-        await plugins.runtime.destroy(handle);
-      } catch {
-        /* best effort */
-      }
-      if (
-        plugins.workspace &&
-        shouldDestroyWorkspacePath(project, spawnConfig.projectId, workspacePath)
-      ) {
-        try {
-          await plugins.workspace.destroy(workspacePath);
-        } catch {
-          /* best effort */
-        }
-      }
-      try {
-        deleteMetadata(sessionsDir, sessionId, false);
-      } catch {
-        /* best effort */
-      }
       throw err;
     }
-
-    // Send initial prompt post-launch for agents that need it (e.g. Claude Code
-    // exits after -p, so we send the prompt after it starts in interactive mode).
-    // This is intentionally outside the try/catch above — a prompt delivery failure
-    // should NOT destroy the session. The agent is running; user can retry with `ao send`.
-    if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
-      try {
-        // Wait for agent to start and be ready for input
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
-      } catch {
-        // Non-fatal: agent is running but didn't receive the initial prompt.
-        // User can retry with `ao send`.
-      }
-    }
-
-    return session;
   }
 
   async function spawnOrchestrator(orchestratorConfig: OrchestratorSpawnConfig): Promise<Session> {
@@ -1221,6 +1293,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   }
 
   async function kill(sessionId: SessionId, options?: { purgeOpenCode?: boolean }): Promise<void> {
+    const correlationId = createCorrelationId("kill");
+    const startedAt = Date.now();
     // Find the session in any project's sessions directory
     let raw: Record<string, string> | null = null;
     let sessionsDir: string | null = null;
@@ -1240,67 +1314,105 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     if (!raw || !sessionsDir) {
-      throw new SessionNotFoundError(sessionId);
+      const error = new SessionNotFoundError(sessionId);
+      recordOperation({
+        metric: "kill",
+        operation: "session.kill",
+        outcome: "failure",
+        correlationId,
+        sessionId,
+        startedAt,
+        reason: error.message,
+      });
+      throw error;
     }
 
-    const cleanupAgent = raw["agent"] ?? project?.agent ?? config.defaults.agent;
+    try {
+      const cleanupAgent = raw["agent"] ?? project?.agent ?? config.defaults.agent;
 
-    // Destroy runtime — prefer handle.runtimeName to find the correct plugin
-    if (raw["runtimeHandle"]) {
-      const handle = safeJsonParse<RuntimeHandle>(raw["runtimeHandle"]);
-      if (handle) {
-        const runtimePlugin = registry.get<Runtime>(
-          "runtime",
-          handle.runtimeName ??
-            (project ? (project.runtime ?? config.defaults.runtime) : config.defaults.runtime),
-        );
-        if (runtimePlugin) {
-          try {
-            await runtimePlugin.destroy(handle);
-          } catch {
-            // Runtime might already be gone
+      // Destroy runtime — prefer handle.runtimeName to find the correct plugin
+      if (raw["runtimeHandle"]) {
+        const handle = safeJsonParse<RuntimeHandle>(raw["runtimeHandle"]);
+        if (handle) {
+          const runtimePlugin = registry.get<Runtime>(
+            "runtime",
+            handle.runtimeName ??
+              (project ? (project.runtime ?? config.defaults.runtime) : config.defaults.runtime),
+          );
+          if (runtimePlugin) {
+            try {
+              await runtimePlugin.destroy(handle);
+            } catch {
+              // Runtime might already be gone
+            }
           }
         }
       }
-    }
 
-    const worktree = raw["worktree"];
-    if (worktree && shouldDestroyWorkspacePath(project, projectId, worktree)) {
-      const workspacePlugin = project
-        ? resolvePlugins(project).workspace
-        : registry.get<Workspace>("workspace", config.defaults.workspace);
-      if (workspacePlugin) {
-        try {
-          await workspacePlugin.destroy(worktree);
-        } catch {
-          // Workspace might already be gone
+      const worktree = raw["worktree"];
+      if (worktree && shouldDestroyWorkspacePath(project, projectId, worktree)) {
+        const workspacePlugin = project
+          ? resolvePlugins(project).workspace
+          : registry.get<Workspace>("workspace", config.defaults.workspace);
+        if (workspacePlugin) {
+          try {
+            await workspacePlugin.destroy(worktree);
+          } catch {
+            // Workspace might already be gone
+          }
         }
       }
-    }
 
-    let didPurgeOpenCodeSession = false;
-    if (options?.purgeOpenCode === true && cleanupAgent === "opencode") {
-      const mappedOpenCodeSessionId =
-        asValidOpenCodeSessionId(raw["opencodeSessionId"]) ??
-        (await discoverOpenCodeSessionIdByTitle(
-          sessionId,
-          OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
-        ));
+      let didPurgeOpenCodeSession = false;
+      if (options?.purgeOpenCode === true && cleanupAgent === "opencode") {
+        const mappedOpenCodeSessionId =
+          asValidOpenCodeSessionId(raw["opencodeSessionId"]) ??
+          (await discoverOpenCodeSessionIdByTitle(
+            sessionId,
+            OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
+          ));
 
-      if (mappedOpenCodeSessionId) {
-        try {
-          await deleteOpenCodeSession(mappedOpenCodeSessionId);
-          didPurgeOpenCodeSession = true;
-        } catch {
-          void 0;
+        if (mappedOpenCodeSessionId) {
+          try {
+            await deleteOpenCodeSession(mappedOpenCodeSessionId);
+            didPurgeOpenCodeSession = true;
+          } catch {
+            void 0;
+          }
         }
       }
-    }
 
-    // Archive metadata
-    deleteMetadata(sessionsDir, sessionId, true);
-    if (didPurgeOpenCodeSession) {
-      markArchivedOpenCodeCleanup(sessionsDir, sessionId);
+      // Archive metadata
+      deleteMetadata(sessionsDir, sessionId, true);
+      if (didPurgeOpenCodeSession) {
+        markArchivedOpenCodeCleanup(sessionsDir, sessionId);
+      }
+
+      recordOperation({
+        metric: "kill",
+        operation: "session.kill",
+        outcome: "success",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        data: {
+          purgedOpenCode: didPurgeOpenCodeSession,
+          purgeRequested: options?.purgeOpenCode === true,
+        },
+      });
+    } catch (err) {
+      recordOperation({
+        metric: "kill",
+        operation: "session.kill",
+        outcome: "failure",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     }
   }
 
@@ -1308,6 +1420,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     projectId?: string,
     options?: { dryRun?: boolean },
   ): Promise<CleanupResult> {
+    const correlationId = createCorrelationId("cleanup");
+    const startedAt = Date.now();
     const result: CleanupResult = { killed: [], skipped: [], errors: [] };
     const sessions = await list(projectId);
     const activeSessionKeys = new Set(
@@ -1464,207 +1578,257 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     result.killed = [...killedKeys].map(formatEntry);
     result.skipped = [...skippedKeys].map(formatEntry);
 
+    recordOperation({
+      metric: "cleanup",
+      operation: "session.cleanup",
+      outcome: result.errors.length === 0 ? "success" : "failure",
+      correlationId,
+      projectId,
+      startedAt,
+      reason: result.errors.length > 0 ? result.errors[0]?.error : undefined,
+      data: {
+        dryRun: options?.dryRun === true,
+        killed: result.killed.length,
+        skipped: result.skipped.length,
+        errors: result.errors.length,
+      },
+    });
+
     return result;
   }
 
   async function send(sessionId: SessionId, message: string): Promise<void> {
+    const correlationId = createCorrelationId("send");
+    const startedAt = Date.now();
     const located = findSessionRecord(sessionId);
     if (!located) {
-      throw new SessionNotFoundError(sessionId);
+      const error = new SessionNotFoundError(sessionId);
+      recordOperation({
+        metric: "send",
+        operation: "session.send",
+        outcome: "failure",
+        correlationId,
+        sessionId,
+        startedAt,
+        reason: error.message,
+      });
+      throw error;
     }
 
     const { raw, sessionsDir, project } = located;
-    const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
-    if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
-      const discovered = await discoverOpenCodeSessionIdByTitle(
-        sessionId,
-        OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
-      );
-      if (discovered) {
-        raw["opencodeSessionId"] = discovered;
-        updateMetadata(sessionsDir, sessionId, { opencodeSessionId: discovered });
-      }
-    }
-    const parsedHandle = raw["runtimeHandle"]
-      ? safeJsonParse<RuntimeHandle>(raw["runtimeHandle"])
-      : null;
-    const runtimeName = parsedHandle?.runtimeName ?? project.runtime ?? config.defaults.runtime;
-    const agentName = raw["agent"] ?? project.agent ?? config.defaults.agent;
-
-    const runtimePlugin = registry.get<Runtime>("runtime", runtimeName);
-    if (!runtimePlugin) {
-      throw new Error(`No runtime plugin for session ${sessionId}`);
-    }
-
-    const agentPlugin = registry.get<Agent>("agent", agentName);
-    if (!agentPlugin) {
-      throw new Error(`No agent plugin for session ${sessionId}`);
-    }
-
-    const captureOutput = async (handle: RuntimeHandle): Promise<string> => {
-      try {
-        return (await runtimePlugin.getOutput(handle, SEND_CONFIRMATION_OUTPUT_LINES)) ?? "";
-      } catch {
-        return "";
-      }
-    };
-
-    const detectActivityFromOutput = (output: string) => {
-      if (!output) return null;
-      try {
-        return agentPlugin.detectActivity(output);
-      } catch {
-        return null;
-      }
-    };
-
-    const hasQueuedMessage = (output: string): boolean => {
-      return output.includes("Press up to edit queued messages");
-    };
-
-    const waitForRestoredSession = async (restoredSession: Session): Promise<void> => {
-      const handle = restoredSession.runtimeHandle;
-      if (!handle) {
-        return;
-      }
-
-      const deadline = Date.now() + SEND_RESTORE_READY_TIMEOUT_MS;
-      while (true) {
-        const [runtimeAlive, processRunning, output] = await Promise.all([
-          runtimePlugin.isAlive(handle).catch(() => true),
-          agentPlugin.isProcessRunning(handle).catch(() => true),
-          captureOutput(handle),
-        ]);
-
-        if (runtimeAlive && (processRunning || output.trim().length > 0)) {
-          return;
-        }
-
-        if (Date.now() >= deadline) {
-          return;
-        }
-
-        await sleep(SEND_RESTORE_READY_POLL_MS);
-      }
-    };
-
-    const restoreForDelivery = async (reason: string, session: Session): Promise<Session> => {
-      if (NON_RESTORABLE_STATUSES.has(session.status)) {
-        throw new Error(`Cannot send to session ${sessionId}: ${reason}`);
-      }
-
-      try {
-        const restored = await restore(sessionId);
-        await waitForRestoredSession(restored);
-        return restored;
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        throw new Error(`Cannot send to session ${sessionId}: ${reason} (${detail})`, {
-          cause: err,
-        });
-      }
-    };
-
-    const prepareSession = async (forceRestore = false): Promise<Session> => {
-      const current = await get(sessionId);
-      if (!current) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      const handle =
-        current.runtimeHandle ??
-        ({
-          id: sessionId,
-          runtimeName,
-          data: {},
-        } satisfies RuntimeHandle);
-      const normalized = current.runtimeHandle ? current : { ...current, runtimeHandle: handle };
-
-      if (forceRestore || isRestorable(normalized)) {
-        return restoreForDelivery(
-          forceRestore
-            ? "session needed to be restarted before delivery"
-            : "session is not running",
-          normalized,
-        );
-      }
-
-      const [runtimeAlive, processRunning] = await Promise.all([
-        runtimePlugin.isAlive(handle).catch(() => true),
-        agentPlugin.isProcessRunning(handle).catch(() => true),
-      ]);
-
-      if (!runtimeAlive || !processRunning) {
-        return restoreForDelivery(
-          !runtimeAlive ? "runtime is not alive" : "agent process is not running",
-          normalized,
-        );
-      }
-
-      return normalized;
-    };
-
-    const sendWithConfirmation = async (session: Session): Promise<void> => {
-      const handle = session.runtimeHandle;
-      if (!handle) {
-        throw new Error(`Session ${sessionId} has no runtime handle`);
-      }
-
-      const baselineOutput = await captureOutput(handle);
-      const baselineActivity = detectActivityFromOutput(baselineOutput) ?? session.activity;
-
-      await runtimePlugin.sendMessage(handle, message);
-
-      for (let attempt = 1; attempt <= SEND_CONFIRMATION_ATTEMPTS; attempt++) {
-        // Sleep before each check (including the first) so the runtime has time
-        // to reflect the message in its output.
-        await sleep(SEND_CONFIRMATION_POLL_MS);
-
-        const output = await captureOutput(handle);
-        const activity = detectActivityFromOutput(output) ?? session.activity;
-        const delivered =
-          hasQueuedMessage(output) ||
-          (output.length > 0 && output !== baselineOutput) ||
-          (baselineActivity !== "active" && activity === "active") ||
-          (baselineActivity !== "waiting_input" && activity === "waiting_input");
-
-        if (delivered) {
-          return;
-        }
-      }
-
-      // Message was already sent via runtimePlugin.sendMessage above — if we
-      // cannot *confirm* delivery (e.g. agent is slow to show output), treat it
-      // as a soft success rather than throwing.  Throwing here caused the caller
-      // to report failure, which prevented the dispatch-hash from updating and
-      // led to duplicate messages on the next poll cycle.
-      return;
-    };
-
-    let prepared = await prepareSession();
+    const projectId =
+      raw["project"] ??
+      Object.keys(config.projects).find((candidate) => config.projects[candidate] === project);
 
     try {
-      await sendWithConfirmation(prepared);
-    } catch (err) {
-      const shouldRetryWithRestore =
-        prepared.restoredAt === undefined && !NON_RESTORABLE_STATUSES.has(prepared.status);
-
-      if (!shouldRetryWithRestore) {
-        if (err instanceof Error) {
-          throw err;
+      const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
+      if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
+        const discovered = await discoverOpenCodeSessionIdByTitle(
+          sessionId,
+          OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
+        );
+        if (discovered) {
+          raw["opencodeSessionId"] = discovered;
+          updateMetadata(sessionsDir, sessionId, { opencodeSessionId: discovered });
         }
-        throw new Error(String(err), { cause: err });
       }
 
-      prepared = await prepareSession(true);
+      const parsedHandle = raw["runtimeHandle"]
+        ? safeJsonParse<RuntimeHandle>(raw["runtimeHandle"])
+        : null;
+      const runtimeName = parsedHandle?.runtimeName ?? project.runtime ?? config.defaults.runtime;
+      const agentName = raw["agent"] ?? project.agent ?? config.defaults.agent;
+
+      const runtimePlugin = registry.get<Runtime>("runtime", runtimeName);
+      if (!runtimePlugin) {
+        throw new Error(`No runtime plugin for session ${sessionId}`);
+      }
+
+      const agentPlugin = registry.get<Agent>("agent", agentName);
+      if (!agentPlugin) {
+        throw new Error(`No agent plugin for session ${sessionId}`);
+      }
+
+      const captureOutput = async (handle: RuntimeHandle): Promise<string> => {
+        try {
+          return (await runtimePlugin.getOutput(handle, SEND_CONFIRMATION_OUTPUT_LINES)) ?? "";
+        } catch {
+          return "";
+        }
+      };
+
+      const detectActivityFromOutput = (output: string) => {
+        if (!output) return null;
+        try {
+          return agentPlugin.detectActivity(output);
+        } catch {
+          return null;
+        }
+      };
+
+      const hasQueuedMessage = (output: string): boolean => {
+        return output.includes("Press up to edit queued messages");
+      };
+
+      const waitForRestoredSession = async (restoredSession: Session): Promise<void> => {
+        const handle = restoredSession.runtimeHandle;
+        if (!handle) {
+          return;
+        }
+
+        const deadline = Date.now() + SEND_RESTORE_READY_TIMEOUT_MS;
+        while (true) {
+          const [runtimeAlive, processRunning, output] = await Promise.all([
+            runtimePlugin.isAlive(handle).catch(() => true),
+            agentPlugin.isProcessRunning(handle).catch(() => true),
+            captureOutput(handle),
+          ]);
+
+          if (runtimeAlive && (processRunning || output.trim().length > 0)) {
+            return;
+          }
+
+          if (Date.now() >= deadline) {
+            return;
+          }
+
+          await sleep(SEND_RESTORE_READY_POLL_MS);
+        }
+      };
+
+      const restoreForDelivery = async (reason: string, session: Session): Promise<Session> => {
+        if (NON_RESTORABLE_STATUSES.has(session.status)) {
+          throw new Error(`Cannot send to session ${sessionId}: ${reason}`);
+        }
+
+        try {
+          const restored = await restore(sessionId);
+          await waitForRestoredSession(restored);
+          return restored;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new Error(`Cannot send to session ${sessionId}: ${reason} (${detail})`, {
+            cause: err,
+          });
+        }
+      };
+
+      const prepareSession = async (forceRestore = false): Promise<Session> => {
+        const current = await get(sessionId);
+        if (!current) {
+          throw new SessionNotFoundError(sessionId);
+        }
+
+        const handle =
+          current.runtimeHandle ??
+          ({
+            id: sessionId,
+            runtimeName,
+            data: {},
+          } satisfies RuntimeHandle);
+        const normalized = current.runtimeHandle ? current : { ...current, runtimeHandle: handle };
+
+        if (forceRestore || isRestorable(normalized)) {
+          return restoreForDelivery(
+            forceRestore
+              ? "session needed to be restarted before delivery"
+              : "session is not running",
+            normalized,
+          );
+        }
+
+        const [runtimeAlive, processRunning] = await Promise.all([
+          runtimePlugin.isAlive(handle).catch(() => true),
+          agentPlugin.isProcessRunning(handle).catch(() => true),
+        ]);
+
+        if (!runtimeAlive || !processRunning) {
+          return restoreForDelivery(
+            !runtimeAlive ? "runtime is not alive" : "agent process is not running",
+            normalized,
+          );
+        }
+
+        return normalized;
+      };
+
+      const sendWithConfirmation = async (session: Session): Promise<void> => {
+        const handle = session.runtimeHandle;
+        if (!handle) {
+          throw new Error(`Session ${sessionId} has no runtime handle`);
+        }
+
+        const baselineOutput = await captureOutput(handle);
+        const baselineActivity = detectActivityFromOutput(baselineOutput) ?? session.activity;
+
+        await runtimePlugin.sendMessage(handle, message);
+
+        for (let attempt = 1; attempt <= SEND_CONFIRMATION_ATTEMPTS; attempt++) {
+          await sleep(SEND_CONFIRMATION_POLL_MS);
+
+          const output = await captureOutput(handle);
+          const activity = detectActivityFromOutput(output) ?? session.activity;
+          const delivered =
+            hasQueuedMessage(output) ||
+            (output.length > 0 && output !== baselineOutput) ||
+            (baselineActivity !== "active" && activity === "active") ||
+            (baselineActivity !== "waiting_input" && activity === "waiting_input");
+
+          if (delivered) {
+            return;
+          }
+        }
+      };
+
+      let prepared = await prepareSession();
+
       try {
         await sendWithConfirmation(prepared);
-      } catch (retryErr) {
-        if (retryErr instanceof Error) {
-          throw retryErr;
+      } catch (err) {
+        const shouldRetryWithRestore =
+          prepared.restoredAt === undefined && !NON_RESTORABLE_STATUSES.has(prepared.status);
+
+        if (!shouldRetryWithRestore) {
+          if (err instanceof Error) {
+            throw err;
+          }
+          throw new Error(String(err), { cause: err });
         }
-        throw new Error(String(retryErr), { cause: retryErr });
+
+        prepared = await prepareSession(true);
+        try {
+          await sendWithConfirmation(prepared);
+        } catch (retryErr) {
+          if (retryErr instanceof Error) {
+            throw retryErr;
+          }
+          throw new Error(String(retryErr), { cause: retryErr });
+        }
       }
+
+      recordOperation({
+        metric: "send",
+        operation: "session.send",
+        outcome: "success",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        data: { messageLength: message.length },
+      });
+    } catch (err) {
+      recordOperation({
+        metric: "send",
+        operation: "session.send",
+        outcome: "failure",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        reason: err instanceof Error ? err.message : String(err),
+        data: { messageLength: message.length },
+      });
+      throw err;
     }
   }
 
@@ -1673,103 +1837,162 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     prRef: string,
     options?: ClaimPROptions,
   ): Promise<ClaimPRResult> {
+    const correlationId = createCorrelationId("claim-pr");
+    const startedAt = Date.now();
     const reference = prRef.trim();
-    if (!reference) throw new Error("PR reference is required");
+    if (!reference) {
+      recordOperation({
+        metric: "claim_pr",
+        operation: "session.claim_pr",
+        outcome: "failure",
+        correlationId,
+        sessionId,
+        startedAt,
+        reason: "PR reference is required",
+      });
+      throw new Error("PR reference is required");
+    }
 
     const located = findSessionRecord(sessionId);
-    if (!located) throw new SessionNotFoundError(sessionId);
+    if (!located) {
+      const error = new SessionNotFoundError(sessionId);
+      recordOperation({
+        metric: "claim_pr",
+        operation: "session.claim_pr",
+        outcome: "failure",
+        correlationId,
+        sessionId,
+        startedAt,
+        reason: error.message,
+        data: { prRef: reference },
+      });
+      throw error;
+    }
 
     const { raw, sessionsDir, project, projectId } = located;
-    if (raw["role"] === "orchestrator") {
-      throw new Error(`Session ${sessionId} is an orchestrator session and cannot claim PRs`);
-    }
-
-    const plugins = resolvePlugins(project, raw["agent"]);
-    const scm = plugins.scm;
-    if (!scm?.resolvePR || !scm.checkoutPR) {
-      throw new Error(
-        `SCM plugin ${project.scm?.plugin ? `"${project.scm.plugin}" ` : ""}does not support claiming existing PRs`,
-      );
-    }
-
-    const pr = await scm.resolvePR(reference, project);
-    const prState = await scm.getPRState(pr);
-    if (prState !== PR_STATE.OPEN) {
-      throw new Error(`Cannot claim PR #${pr.number} because it is ${prState}`);
-    }
-
-    const conflictingSessions = new Set<SessionId>();
-    for (const { sessionName } of listAllSessions(projectId)) {
-      if (sessionName === sessionId) continue;
-
-      const otherRaw = readMetadataRaw(sessionsDir, sessionName);
-      if (!otherRaw || otherRaw["role"] === "orchestrator") continue;
-
-      const samePr = otherRaw["pr"] === pr.url;
-      const sameBranch =
-        otherRaw["branch"] === pr.branch && (otherRaw["prAutoDetect"] ?? "on") !== "off";
-
-      if (samePr || sameBranch) {
-        conflictingSessions.add(sessionName);
+    try {
+      if (raw["role"] === "orchestrator") {
+        throw new Error(`Session ${sessionId} is an orchestrator session and cannot claim PRs`);
       }
-    }
 
-    const takenOverFrom = [...conflictingSessions];
-    if (takenOverFrom.length > 0 && !options?.takeover) {
-      throw new Error(
-        `PR #${pr.number} is already tracked by ${takenOverFrom.join(", ")}. Re-run with takeover enabled to transfer ownership.`,
-      );
-    }
+      const plugins = resolvePlugins(project, raw["agent"]);
+      const scm = plugins.scm;
+      if (!scm?.resolvePR || !scm.checkoutPR) {
+        throw new Error(
+          `SCM plugin ${project.scm?.plugin ? `"${project.scm.plugin}" ` : ""}does not support claiming existing PRs`,
+        );
+      }
 
-    const workspacePath = raw["worktree"];
-    if (!workspacePath) {
-      throw new Error(`Session ${sessionId} has no workspace to check out PR #${pr.number}`);
-    }
+      const pr = await scm.resolvePR(reference, project);
+      const prState = await scm.getPRState(pr);
+      if (prState !== PR_STATE.OPEN) {
+        throw new Error(`Cannot claim PR #${pr.number} because it is ${prState}`);
+      }
 
-    const branchChanged = await scm.checkoutPR(pr, workspacePath);
+      const conflictingSessions = new Set<SessionId>();
+      for (const { sessionName } of listAllSessions(projectId)) {
+        if (sessionName === sessionId) continue;
 
-    updateMetadata(sessionsDir, sessionId, {
-      pr: pr.url,
-      status: "pr_open",
-      branch: pr.branch,
-      prAutoDetect: "",
-    });
+        const otherRaw = readMetadataRaw(sessionsDir, sessionName);
+        if (!otherRaw || otherRaw["role"] === "orchestrator") continue;
 
-    for (const previousSessionId of takenOverFrom) {
-      const previousRaw = readMetadataRaw(sessionsDir, previousSessionId);
-      if (!previousRaw) continue;
+        const samePr = otherRaw["pr"] === pr.url;
+        const sameBranch =
+          otherRaw["branch"] === pr.branch && (otherRaw["prAutoDetect"] ?? "on") !== "off";
 
-      updateMetadata(sessionsDir, previousSessionId, {
-        pr: "",
-        prAutoDetect: "off",
-        ...(PR_TRACKING_STATUSES.has(previousRaw["status"] ?? "") ? { status: "working" } : {}),
-      });
-    }
-
-    let githubAssigned = false;
-    let githubAssignmentError: string | undefined;
-    if (options?.assignOnGithub) {
-      if (!scm.assignPRToCurrentUser) {
-        githubAssignmentError = `SCM plugin "${scm.name}" does not support assigning PRs`;
-      } else {
-        try {
-          await scm.assignPRToCurrentUser(pr);
-          githubAssigned = true;
-        } catch (err) {
-          githubAssignmentError = err instanceof Error ? err.message : String(err);
+        if (samePr || sameBranch) {
+          conflictingSessions.add(sessionName);
         }
       }
-    }
 
-    return {
-      sessionId,
-      projectId,
-      pr,
-      branchChanged,
-      githubAssigned,
-      githubAssignmentError,
-      takenOverFrom,
-    };
+      const takenOverFrom = [...conflictingSessions];
+      if (takenOverFrom.length > 0 && !options?.takeover) {
+        throw new Error(
+          `PR #${pr.number} is already tracked by ${takenOverFrom.join(", ")}. Re-run with takeover enabled to transfer ownership.`,
+        );
+      }
+
+      const workspacePath = raw["worktree"];
+      if (!workspacePath) {
+        throw new Error(`Session ${sessionId} has no workspace to check out PR #${pr.number}`);
+      }
+
+      const branchChanged = await scm.checkoutPR(pr, workspacePath);
+
+      updateMetadata(sessionsDir, sessionId, {
+        pr: pr.url,
+        status: "pr_open",
+        branch: pr.branch,
+        prAutoDetect: "",
+      });
+
+      for (const previousSessionId of takenOverFrom) {
+        const previousRaw = readMetadataRaw(sessionsDir, previousSessionId);
+        if (!previousRaw) continue;
+
+        updateMetadata(sessionsDir, previousSessionId, {
+          pr: "",
+          prAutoDetect: "off",
+          ...(PR_TRACKING_STATUSES.has(previousRaw["status"] ?? "") ? { status: "working" } : {}),
+        });
+      }
+
+      let githubAssigned = false;
+      let githubAssignmentError: string | undefined;
+      if (options?.assignOnGithub) {
+        if (!scm.assignPRToCurrentUser) {
+          githubAssignmentError = `SCM plugin "${scm.name}" does not support assigning PRs`;
+        } else {
+          try {
+            await scm.assignPRToCurrentUser(pr);
+            githubAssigned = true;
+          } catch (err) {
+            githubAssignmentError = err instanceof Error ? err.message : String(err);
+          }
+        }
+      }
+
+      const result = {
+        sessionId,
+        projectId,
+        pr,
+        branchChanged,
+        githubAssigned,
+        githubAssignmentError,
+        takenOverFrom,
+      };
+
+      recordOperation({
+        metric: "claim_pr",
+        operation: "session.claim_pr",
+        outcome: "success",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        data: {
+          prNumber: pr.number,
+          branchChanged,
+          githubAssigned,
+          takenOverFrom,
+        },
+      });
+
+      return result;
+    } catch (err) {
+      recordOperation({
+        metric: "claim_pr",
+        operation: "session.claim_pr",
+        outcome: "failure",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        reason: err instanceof Error ? err.message : String(err),
+        data: { prRef: reference },
+      });
+      throw err;
+    }
   }
 
   async function remap(sessionId: SessionId, force = false): Promise<string> {
@@ -1814,6 +2037,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   }
 
   async function restore(sessionId: SessionId): Promise<Session> {
+    const correlationId = createCorrelationId("restore");
+    const startedAt = Date.now();
     // 1. Find session metadata across all projects (active first, then archive)
     let raw: Record<string, string> | null = null;
     let sessionsDir: string | null = null;
@@ -1850,203 +2075,241 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     if (!raw || !sessionsDir || !project || !projectId) {
-      throw new SessionNotFoundError(sessionId);
-    }
-
-    const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
-    if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
-      const discovered = await discoverOpenCodeSessionIdByTitle(
+      const error = new SessionNotFoundError(sessionId);
+      recordOperation({
+        metric: "restore",
+        operation: "session.restore",
+        outcome: "failure",
+        correlationId,
         sessionId,
-        OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
-      );
-      if (!discovered) {
-        throw new SessionNotRestorableError(sessionId, "OpenCode session mapping is missing");
-      }
-      raw = { ...raw, opencodeSessionId: discovered };
-      if (!fromArchive) {
-        updateMetadata(sessionsDir, sessionId, { opencodeSessionId: discovered });
-      }
-    }
-
-    // 2. Reconstruct Session from metadata and enrich with live runtime state.
-    //    metadataToSession sets activity: null, so without enrichment a crashed
-    //    session (status "working", agent exited) would not be detected as terminal
-    //    and isRestorable would reject it.
-    const session = metadataToSession(sessionId, raw);
-    const plugins = resolvePlugins(project, raw["agent"]);
-    await enrichSessionWithRuntimeState(session, plugins, true);
-
-    // 3. Validate restorability
-    if (!isRestorable(session)) {
-      if (NON_RESTORABLE_STATUSES.has(session.status)) {
-        throw new SessionNotRestorableError(sessionId, `status is "${session.status}"`);
-      }
-      throw new SessionNotRestorableError(sessionId, "session is not in a terminal state");
-    }
-
-    if (fromArchive) {
-      writeMetadata(sessionsDir, sessionId, {
-        worktree: raw["worktree"] ?? "",
-        branch: raw["branch"] ?? "",
-        status: raw["status"] ?? "killed",
-        role: raw["role"],
-        tmuxName: raw["tmuxName"],
-        issue: raw["issue"],
-        pr: raw["pr"],
-        prAutoDetect:
-          raw["prAutoDetect"] === "off" ? "off" : raw["prAutoDetect"] === "on" ? "on" : undefined,
-        summary: raw["summary"],
-        project: raw["project"],
-        agent: raw["agent"],
-        createdAt: raw["createdAt"],
-        runtimeHandle: raw["runtimeHandle"],
-        opencodeSessionId: raw["opencodeSessionId"],
+        startedAt,
+        reason: error.message,
       });
+      throw error;
     }
 
-    // 4. Validate required plugins (plugins already resolved above for enrichment)
-    if (!plugins.runtime) {
-      throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
-    }
-    if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
-    }
-
-    // 5. Check workspace
-    const workspacePath = raw["worktree"] || project.path;
-    const workspaceExists = plugins.workspace?.exists
-      ? await plugins.workspace.exists(workspacePath)
-      : existsSync(workspacePath);
-
-    if (!workspaceExists) {
-      // Try to restore workspace if plugin supports it
-      if (!plugins.workspace?.restore) {
-        throw new WorkspaceMissingError(workspacePath, "workspace plugin does not support restore");
+    try {
+      const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
+      if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
+        const discovered = await discoverOpenCodeSessionIdByTitle(
+          sessionId,
+          OPENCODE_INTERACTIVE_DISCOVERY_TIMEOUT_MS,
+        );
+        if (!discovered) {
+          throw new SessionNotRestorableError(sessionId, "OpenCode session mapping is missing");
+        }
+        raw = { ...raw, opencodeSessionId: discovered };
+        if (!fromArchive) {
+          updateMetadata(sessionsDir, sessionId, { opencodeSessionId: discovered });
+        }
       }
-      if (!session.branch) {
-        throw new WorkspaceMissingError(workspacePath, "branch metadata is missing");
+
+      // 2. Reconstruct Session from metadata and enrich with live runtime state.
+      //    metadataToSession sets activity: null, so without enrichment a crashed
+      //    session (status "working", agent exited) would not be detected as terminal
+      //    and isRestorable would reject it.
+      const session = metadataToSession(sessionId, raw);
+      const plugins = resolvePlugins(project, raw["agent"]);
+      await enrichSessionWithRuntimeState(session, plugins, true);
+
+      // 3. Validate restorability
+      if (!isRestorable(session)) {
+        if (NON_RESTORABLE_STATUSES.has(session.status)) {
+          throw new SessionNotRestorableError(sessionId, `status is "${session.status}"`);
+        }
+        throw new SessionNotRestorableError(sessionId, "session is not in a terminal state");
       }
-      try {
-        const wsInfo = await plugins.workspace.restore(
-          {
-            projectId,
-            project,
-            sessionId,
-            branch: session.branch,
+
+      if (fromArchive) {
+        writeMetadata(sessionsDir, sessionId, {
+          worktree: raw["worktree"] ?? "",
+          branch: raw["branch"] ?? "",
+          status: raw["status"] ?? "killed",
+          role: raw["role"],
+          tmuxName: raw["tmuxName"],
+          issue: raw["issue"],
+          pr: raw["pr"],
+          prAutoDetect:
+            raw["prAutoDetect"] === "off" ? "off" : raw["prAutoDetect"] === "on" ? "on" : undefined,
+          summary: raw["summary"],
+          project: raw["project"],
+          agent: raw["agent"],
+          createdAt: raw["createdAt"],
+          runtimeHandle: raw["runtimeHandle"],
+          opencodeSessionId: raw["opencodeSessionId"],
+        });
+      }
+
+      // 4. Validate required plugins (plugins already resolved above for enrichment)
+      if (!plugins.runtime) {
+        throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
+      }
+      if (!plugins.agent) {
+        throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      }
+
+      // 5. Check workspace
+      const workspacePath = raw["worktree"] || project.path;
+      const workspaceExists = plugins.workspace?.exists
+        ? await plugins.workspace.exists(workspacePath)
+        : existsSync(workspacePath);
+
+      if (!workspaceExists) {
+        // Try to restore workspace if plugin supports it
+        if (!plugins.workspace?.restore) {
+          throw new WorkspaceMissingError(
+            workspacePath,
+            "workspace plugin does not support restore",
+          );
+        }
+        if (!session.branch) {
+          throw new WorkspaceMissingError(workspacePath, "branch metadata is missing");
+        }
+        try {
+          const wsInfo = await plugins.workspace.restore(
+            {
+              projectId,
+              project,
+              sessionId,
+              branch: session.branch,
+            },
+            workspacePath,
+          );
+
+          // Run post-create hooks on restored workspace
+          if (plugins.workspace.postCreate) {
+            await plugins.workspace.postCreate(wsInfo, project);
+          }
+        } catch (err) {
+          throw new WorkspaceMissingError(
+            workspacePath,
+            `restore failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      // 6. Destroy old runtime if still alive (e.g. tmux session survives agent crash)
+      if (session.runtimeHandle) {
+        try {
+          await plugins.runtime.destroy(session.runtimeHandle);
+        } catch {
+          // Best effort — may already be gone
+        }
+      }
+
+      // 7. Get launch command — try restore command first, fall back to fresh launch
+      let launchCommand: string;
+      const configuredSubagent =
+        typeof project.agentConfig?.["subagent"] === "string"
+          ? project.agentConfig["subagent"]
+          : undefined;
+      const agentLaunchConfig = {
+        sessionId,
+        projectConfig: {
+          ...project,
+          agentConfig: {
+            ...(project.agentConfig ?? {}),
+            ...(session.metadata?.opencodeSessionId
+              ? { opencodeSessionId: session.metadata.opencodeSessionId }
+              : {}),
           },
-          workspacePath,
-        );
-
-        // Run post-create hooks on restored workspace
-        if (plugins.workspace.postCreate) {
-          await plugins.workspace.postCreate(wsInfo, project);
-        }
-      } catch (err) {
-        throw new WorkspaceMissingError(
-          workspacePath,
-          `restore failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    // 6. Destroy old runtime if still alive (e.g. tmux session survives agent crash)
-    if (session.runtimeHandle) {
-      try {
-        await plugins.runtime.destroy(session.runtimeHandle);
-      } catch {
-        // Best effort — may already be gone
-      }
-    }
-
-    // 7. Get launch command — try restore command first, fall back to fresh launch
-    let launchCommand: string;
-    const configuredSubagent =
-      typeof project.agentConfig?.["subagent"] === "string"
-        ? project.agentConfig["subagent"]
-        : undefined;
-    const agentLaunchConfig = {
-      sessionId,
-      projectConfig: {
-        ...project,
-        agentConfig: {
-          ...(project.agentConfig ?? {}),
-          ...(session.metadata?.opencodeSessionId
-            ? { opencodeSessionId: session.metadata.opencodeSessionId }
-            : {}),
         },
-      },
-      issueId: session.issueId ?? undefined,
-      permissions: project.agentConfig?.permissions,
-      model:
-        raw["role"] === "orchestrator"
-          ? (project.agentConfig?.orchestratorModel ?? project.agentConfig?.model)
-          : project.agentConfig?.model,
-      subagent: configuredSubagent,
-    };
+        issueId: session.issueId ?? undefined,
+        permissions: project.agentConfig?.permissions,
+        model:
+          raw["role"] === "orchestrator"
+            ? (project.agentConfig?.orchestratorModel ?? project.agentConfig?.model)
+            : project.agentConfig?.model,
+        subagent: configuredSubagent,
+      };
 
-    if (plugins.agent.getRestoreCommand) {
-      const restoreCmd = await plugins.agent.getRestoreCommand(session, project);
-      launchCommand = restoreCmd ?? plugins.agent.getLaunchCommand(agentLaunchConfig);
-    } else {
-      launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
-    }
-
-    const environment = plugins.agent.getEnvironment(agentLaunchConfig);
-
-    // 8. Create runtime (reuse tmuxName from metadata)
-    const tmuxName = raw["tmuxName"];
-    const handle = await plugins.runtime.create({
-      sessionId: tmuxName ?? sessionId,
-      workspacePath,
-      launchCommand,
-      environment: {
-        ...environment,
-        AO_SESSION: sessionId,
-        AO_DATA_DIR: sessionsDir,
-        AO_SESSION_NAME: sessionId,
-        ...(tmuxName && { AO_TMUX_NAME: tmuxName }),
-      },
-    });
-
-    // 9. Update metadata — merge updates, preserving existing fields
-    const now = new Date().toISOString();
-    updateMetadata(sessionsDir, sessionId, {
-      status: "spawning",
-      runtimeHandle: JSON.stringify(handle),
-      restoredAt: now,
-    });
-
-    // 10. Run postLaunchSetup (non-fatal)
-    const restoredSession: Session = {
-      ...session,
-      status: "spawning",
-      activity: "active",
-      workspacePath,
-      runtimeHandle: handle,
-      restoredAt: new Date(now),
-    };
-
-    if (plugins.agent.postLaunchSetup) {
-      try {
-        const metadataBeforePostLaunch = { ...(restoredSession.metadata ?? {}) };
-        await plugins.agent.postLaunchSetup(restoredSession);
-
-        const metadataAfterPostLaunch = restoredSession.metadata ?? {};
-        const metadataUpdates = Object.fromEntries(
-          Object.entries(metadataAfterPostLaunch).filter(
-            ([key, value]) => metadataBeforePostLaunch[key] !== value,
-          ),
-        );
-
-        if (Object.keys(metadataUpdates).length > 0) {
-          updateMetadata(sessionsDir, sessionId, metadataUpdates);
-        }
-      } catch {
-        // Non-fatal — session is already running
+      if (plugins.agent.getRestoreCommand) {
+        const restoreCmd = await plugins.agent.getRestoreCommand(session, project);
+        launchCommand = restoreCmd ?? plugins.agent.getLaunchCommand(agentLaunchConfig);
+      } else {
+        launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
       }
-    }
 
-    return restoredSession;
+      const environment = plugins.agent.getEnvironment(agentLaunchConfig);
+
+      // 8. Create runtime (reuse tmuxName from metadata)
+      const tmuxName = raw["tmuxName"];
+      const handle = await plugins.runtime.create({
+        sessionId: tmuxName ?? sessionId,
+        workspacePath,
+        launchCommand,
+        environment: {
+          ...environment,
+          AO_SESSION: sessionId,
+          AO_DATA_DIR: sessionsDir,
+          AO_SESSION_NAME: sessionId,
+          ...(tmuxName && { AO_TMUX_NAME: tmuxName }),
+        },
+      });
+
+      // 9. Update metadata — merge updates, preserving existing fields
+      const now = new Date().toISOString();
+      updateMetadata(sessionsDir, sessionId, {
+        status: "spawning",
+        runtimeHandle: JSON.stringify(handle),
+        restoredAt: now,
+      });
+
+      // 10. Run postLaunchSetup (non-fatal)
+      const restoredSession: Session = {
+        ...session,
+        status: "spawning",
+        activity: "active",
+        workspacePath,
+        runtimeHandle: handle,
+        restoredAt: new Date(now),
+      };
+
+      if (plugins.agent.postLaunchSetup) {
+        try {
+          const metadataBeforePostLaunch = { ...(restoredSession.metadata ?? {}) };
+          await plugins.agent.postLaunchSetup(restoredSession);
+
+          const metadataAfterPostLaunch = restoredSession.metadata ?? {};
+          const metadataUpdates = Object.fromEntries(
+            Object.entries(metadataAfterPostLaunch).filter(
+              ([key, value]) => metadataBeforePostLaunch[key] !== value,
+            ),
+          );
+
+          if (Object.keys(metadataUpdates).length > 0) {
+            updateMetadata(sessionsDir, sessionId, metadataUpdates);
+          }
+        } catch {
+          // Non-fatal — session is already running
+        }
+      }
+
+      recordOperation({
+        metric: "restore",
+        operation: "session.restore",
+        outcome: "success",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        data: { fromArchive, workspacePath, branch: restoredSession.branch },
+      });
+
+      return restoredSession;
+    } catch (err) {
+      recordOperation({
+        metric: "restore",
+        operation: "session.restore",
+        outcome: "failure",
+        correlationId,
+        projectId,
+        sessionId,
+        startedAt,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   }
 
   return { spawn, spawnOrchestrator, restore, list, get, kill, cleanup, send, claimPR, remap };

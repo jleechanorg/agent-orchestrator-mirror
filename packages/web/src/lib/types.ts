@@ -130,6 +130,8 @@ export interface DashboardStats {
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
+  correlationId?: string;
+  emittedAt?: string;
   sessions: Array<{
     id: string;
     status: SessionStatus;
