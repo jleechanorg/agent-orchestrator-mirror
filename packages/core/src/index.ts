@@ -25,8 +25,10 @@ export { createPluginRegistry } from "./plugin-registry.js";
 export {
   readMetadata,
   readMetadataRaw,
+  readArchivedMetadataRaw,
   writeMetadata,
   updateMetadata,
+  updateArchivedMetadata,
   deleteMetadata,
   listMetadata,
 } from "./metadata.js";

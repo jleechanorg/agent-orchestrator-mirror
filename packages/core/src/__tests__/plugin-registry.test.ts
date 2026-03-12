@@ -285,6 +285,29 @@ describe("loadBuiltins", () => {
       retries: 3,
     });
   });
+
+  it("passes configured runtime plugin config to create()", async () => {
+    const registry = createPluginRegistry();
+    const fakeDockerRuntime = makePlugin("runtime", "docker");
+    const config = makeOrchestratorConfig({
+      runtimes: {
+        docker: {
+          image: "node:20-bookworm",
+          dashboardPorts: [3000],
+        },
+      },
+    });
+
+    await registry.loadBuiltins(config, async (pkg: string) => {
+      if (pkg === "@composio/ao-plugin-runtime-docker") return fakeDockerRuntime;
+      throw new Error(`Not found: ${pkg}`);
+    });
+
+    expect(fakeDockerRuntime.create).toHaveBeenCalledWith({
+      image: "node:20-bookworm",
+      dashboardPorts: [3000],
+    });
+  });
 });
 
 describe("extractPluginConfig (via register with config)", () => {

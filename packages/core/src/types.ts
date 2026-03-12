@@ -894,6 +894,8 @@ export interface OrchestratorConfig {
   /** Default plugin selections */
   defaults: DefaultPlugins;
 
+  runtimes?: Record<string, Record<string, unknown>>;
+
   /** Project configurations */
   projects: Record<string, ProjectConfig>;
 

@@ -414,6 +414,32 @@ describe("Config Schema Validation", () => {
     expect(validated.projects.proj1.agentConfig?.model).toBe("worker-model");
     expect(validated.projects.proj1.agentConfig?.orchestratorModel).toBe("orchestrator-model");
   });
+
+  it("accepts runtime configuration blocks", () => {
+    const validated = validateConfig({
+      runtimes: {
+        docker: {
+          image: "node:20-bookworm",
+          dashboardPorts: [3000, 4173],
+          portRangeStart: 38000,
+        },
+      },
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          runtime: "docker",
+        },
+      },
+    });
+
+    expect(validated.runtimes?.docker).toEqual({
+      image: "node:20-bookworm",
+      dashboardPorts: [3000, 4173],
+      portRangeStart: 38000,
+    });
+  });
 });
 
 describe("Config Defaults", () => {

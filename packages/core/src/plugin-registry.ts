@@ -27,6 +27,7 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   // Runtimes
   { slot: "runtime", name: "tmux", pkg: "@composio/ao-plugin-runtime-tmux" },
   { slot: "runtime", name: "process", pkg: "@composio/ao-plugin-runtime-process" },
+  { slot: "runtime", name: "docker", pkg: "@composio/ao-plugin-runtime-docker" },
   // Agents
   { slot: "agent", name: "claude-code", pkg: "@composio/ao-plugin-agent-claude-code" },
   { slot: "agent", name: "codex", pkg: "@composio/ao-plugin-agent-codex" },
@@ -59,8 +60,12 @@ function extractPluginConfig(
   name: string,
   config: OrchestratorConfig,
 ): Record<string, unknown> | undefined {
-  // Notifiers are configured under config.notifiers.<id>.
-  // Match by key (e.g. "openclaw") or explicit plugin field.
+  if (slot === "runtime") {
+    const runtimeConfig = config.runtimes?.[name];
+    if (runtimeConfig && typeof runtimeConfig === "object") {
+      return runtimeConfig;
+    }
+  }
   if (slot === "notifier") {
     for (const [notifierName, notifierConfig] of Object.entries(config.notifiers ?? {})) {
       if (!notifierConfig || typeof notifierConfig !== "object") continue;
