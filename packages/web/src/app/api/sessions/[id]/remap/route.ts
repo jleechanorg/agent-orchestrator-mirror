@@ -39,25 +39,49 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       correlationId,
     );
   } catch (err) {
-    const { config, sessionManager } = await getServices();
-    const projectId = await resolveProjectIdForSession(sessionManager, id);
+    const { config, sessionManager } = await getServices().catch(() => ({
+      config: undefined,
+      sessionManager: undefined,
+    }));
+    const projectId = sessionManager
+      ? await resolveProjectIdForSession(sessionManager, id)
+      : undefined;
     if (err instanceof SessionNotFoundError) {
-      recordApiObservation({
-        config,
-        method: "POST",
-        path: "/api/sessions/[id]/remap",
-        correlationId,
-        startedAt,
-        outcome: "failure",
-        statusCode: 404,
-        projectId,
-        sessionId: id,
-        reason: err.message,
-      });
+      if (config) {
+        recordApiObservation({
+          config,
+          method: "POST",
+          path: "/api/sessions/[id]/remap",
+          correlationId,
+          startedAt,
+          outcome: "failure",
+          statusCode: 404,
+          projectId,
+          sessionId: id,
+          reason: err.message,
+        });
+      }
       return jsonWithCorrelation({ error: err.message }, { status: 404 }, correlationId);
     }
     const msg = err instanceof Error ? err.message : "Failed to remap session";
     if (msg.includes("not using the opencode agent") || msg.includes("mapping is missing")) {
+      if (config) {
+        recordApiObservation({
+          config,
+          method: "POST",
+          path: "/api/sessions/[id]/remap",
+          correlationId,
+          startedAt,
+          outcome: "failure",
+          statusCode: 422,
+          projectId,
+          sessionId: id,
+          reason: msg,
+        });
+      }
+      return jsonWithCorrelation({ error: msg }, { status: 422 }, correlationId);
+    }
+    if (config) {
       recordApiObservation({
         config,
         method: "POST",
@@ -65,25 +89,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         correlationId,
         startedAt,
         outcome: "failure",
-        statusCode: 422,
+        statusCode: 500,
         projectId,
         sessionId: id,
         reason: msg,
       });
-      return jsonWithCorrelation({ error: msg }, { status: 422 }, correlationId);
     }
-    recordApiObservation({
-      config,
-      method: "POST",
-      path: "/api/sessions/[id]/remap",
-      correlationId,
-      startedAt,
-      outcome: "failure",
-      statusCode: 500,
-      projectId,
-      sessionId: id,
-      reason: msg,
-    });
     return jsonWithCorrelation({ error: msg }, { status: 500 }, correlationId);
   }
 }

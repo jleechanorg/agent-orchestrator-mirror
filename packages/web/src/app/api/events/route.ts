@@ -1,6 +1,7 @@
 import { getServices } from "@/lib/services";
 import { sessionToDashboard } from "@/lib/serialize";
 import { getAttentionLevel } from "@/lib/types";
+import { filterWorkerSessions } from "@/lib/project-utils";
 import {
   createCorrelationId,
   createProjectObserver,
@@ -15,9 +16,12 @@ export const dynamic = "force-dynamic";
  * Sends session state updates to connected clients.
  * Polls SessionManager.list() on an interval (no SSE push from core yet).
  */
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  const effectiveRequest = request ?? new Request("http://localhost/api/events");
   const encoder = new TextEncoder();
   const correlationId = createCorrelationId("sse");
+  const { searchParams } = new URL(effectiveRequest.url);
+  const projectFilter = searchParams.get("project");
   type ServicesConfig = Awaited<ReturnType<typeof getServices>>["config"];
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let updates: ReturnType<typeof setInterval> | undefined;
@@ -68,8 +72,13 @@ export async function GET(): Promise<Response> {
       void (async () => {
         try {
           const { config, sessionManager } = await getServices();
-          const sessions = await sessionManager.list();
-          const dashboardSessions = sessions.map(sessionToDashboard);
+          const requestedProjectId =
+            projectFilter && projectFilter !== "all" && config.projects[projectFilter]
+              ? projectFilter
+              : undefined;
+          const sessions = await sessionManager.list(requestedProjectId);
+          const workerSessions = filterWorkerSessions(sessions, projectFilter, config.projects);
+          const dashboardSessions = workerSessions.map(sessionToDashboard);
           const projectObserver = ensureObserver(config);
 
           const initialEvent = {
@@ -122,8 +131,13 @@ export async function GET(): Promise<Response> {
           let dashboardSessions;
           try {
             const { config, sessionManager } = await getServices();
-            const sessions = await sessionManager.list();
-            dashboardSessions = sessions.map(sessionToDashboard);
+            const requestedProjectId =
+              projectFilter && projectFilter !== "all" && config.projects[projectFilter]
+                ? projectFilter
+                : undefined;
+            const sessions = await sessionManager.list(requestedProjectId);
+            const workerSessions = filterWorkerSessions(sessions, projectFilter, config.projects);
+            dashboardSessions = workerSessions.map(sessionToDashboard);
             const projectObserver = ensureObserver(config);
 
             if (projectObserver && observerProjectId) {

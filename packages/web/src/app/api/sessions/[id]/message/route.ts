@@ -107,17 +107,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
   } catch (error) {
     console.error("Failed to send message:", error);
-    const { config } = await getServices();
-    recordApiObservation({
-      config,
-      method: "POST",
-      path: "/api/sessions/[id]/message",
-      correlationId,
-      startedAt,
-      outcome: "failure",
-      statusCode: 500,
-      reason: error instanceof Error ? error.message : "Internal server error",
-    });
+    const { config } = await getServices().catch(() => ({ config: undefined }));
+    if (config) {
+      recordApiObservation({
+        config,
+        method: "POST",
+        path: "/api/sessions/[id]/message",
+        correlationId,
+        startedAt,
+        outcome: "failure",
+        statusCode: 500,
+        reason: error instanceof Error ? error.message : "Internal server error",
+      });
+    }
     return jsonWithCorrelation({ error: "Internal server error" }, { status: 500 }, correlationId);
   }
 }

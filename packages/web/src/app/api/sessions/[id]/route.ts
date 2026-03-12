@@ -55,20 +55,25 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     return jsonWithCorrelation(dashboardSession, { status: 200 }, correlationId);
   } catch (error) {
     const { id } = await params;
-    const { config, sessionManager } = await getServices();
-    const session = await sessionManager.get(id).catch(() => null);
-    recordApiObservation({
-      config,
-      method: "GET",
-      path: "/api/sessions/[id]",
-      correlationId,
-      startedAt,
-      outcome: "failure",
-      statusCode: 500,
-      projectId: session?.projectId,
-      sessionId: id,
-      reason: error instanceof Error ? error.message : "Internal server error",
-    });
+    const { config, sessionManager } = await getServices().catch(() => ({
+      config: undefined,
+      sessionManager: undefined,
+    }));
+    const session = sessionManager ? await sessionManager.get(id).catch(() => null) : null;
+    if (config) {
+      recordApiObservation({
+        config,
+        method: "GET",
+        path: "/api/sessions/[id]",
+        correlationId,
+        startedAt,
+        outcome: "failure",
+        statusCode: 500,
+        projectId: session?.projectId,
+        sessionId: id,
+        reason: error instanceof Error ? error.message : "Internal server error",
+      });
+    }
     return jsonWithCorrelation({ error: "Internal server error" }, { status: 500 }, correlationId);
   }
 }

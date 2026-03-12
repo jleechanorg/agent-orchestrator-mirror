@@ -8,6 +8,8 @@ import {
 } from "@composio/ao-core";
 import { NextResponse } from "next/server";
 
+let webApiObserver: ReturnType<typeof createProjectObserver> | null | undefined;
+
 interface ApiObservationInput {
   config: OrchestratorConfig;
   method: string;
@@ -39,13 +41,21 @@ export function jsonWithCorrelation(
 
 export function recordApiObservation(input: ApiObservationInput): void {
   try {
-    const observer = createProjectObserver(input.config, "web-api");
-    observer.recordOperation({
+    if (webApiObserver === undefined) {
+      webApiObserver = createProjectObserver(input.config, "web-api");
+    }
+    if (!webApiObserver) {
+      return;
+    }
+
+    const projectId = input.projectId ?? Object.keys(input.config.projects)[0];
+
+    webApiObserver.recordOperation({
       metric: "api_request",
       operation: `${input.method} ${input.path}`,
       outcome: input.outcome,
       correlationId: input.correlationId,
-      projectId: input.projectId,
+      projectId,
       sessionId: input.sessionId,
       reason: input.reason,
       durationMs: Date.now() - input.startedAt,
@@ -58,7 +68,7 @@ export function recordApiObservation(input: ApiObservationInput): void {
       level: input.outcome === "failure" ? "error" : "info",
     });
   } catch {
-    void 0;
+    webApiObserver = null;
   }
 }
 
