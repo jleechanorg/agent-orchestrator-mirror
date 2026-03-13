@@ -44,6 +44,7 @@ import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
 
 const DEFAULT_PORT = 3000;
+const TERMINAL_READY_TIMEOUT_MS = 20_000;
 
 // =============================================================================
 // HELPERS
@@ -253,6 +254,51 @@ async function startDashboard(
   return child;
 }
 
+async function waitForDashboardPort(port: number, timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const free = await isPortAvailable(port);
+    if (!free) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return false;
+}
+
+async function ensureTerminalTransportReady(port: number): Promise<boolean> {
+  if (process.env["VITEST"] === "true") {
+    return true;
+  }
+
+  const dashboardReady = await waitForDashboardPort(port);
+  if (!dashboardReady) {
+    return false;
+  }
+
+  const deadline = Date.now() + TERMINAL_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://localhost:${port}/api/terminal-health`);
+      if (res.ok) {
+        const body = (await res.json()) as {
+          services?: {
+            terminalWebsocket?: { healthy?: boolean };
+            directTerminalWebsocket?: { healthy?: boolean };
+          };
+        };
+        const terminalHealthy = body.services?.terminalWebsocket?.healthy === true;
+        const directHealthy = body.services?.directTerminalWebsocket?.healthy === true;
+        if (terminalHealthy && directHealthy) {
+          return true;
+        }
+      }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
 /**
  * Shared startup logic: launch dashboard + orchestrator session, print summary.
  * Used by both normal and URL-based start flows.
@@ -314,6 +360,16 @@ async function runStartup(
     );
     spinner.succeed(`Dashboard starting on http://localhost:${port}`);
     console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
+
+    spinner.start("Checking terminal websocket services");
+    const terminalsReady = await ensureTerminalTransportReady(port);
+    if (terminalsReady) {
+      spinner.succeed("Terminal websocket services healthy");
+    } else {
+      spinner.warn(
+        "Terminal websocket services still recovering (dashboard will report degraded health)",
+      );
+    }
   }
 
   if (shouldStartLifecycle) {
