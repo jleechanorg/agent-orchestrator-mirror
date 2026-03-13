@@ -847,7 +847,7 @@ describe("API Routes", () => {
       });
       expect(verifyRes.status).toBe(200);
       const verifyData = await verifyRes.json();
-      expect(["pass", "fail"]).toContain(verifyData.verificationStatus);
+      expect(verifyData.verificationStatus).toBe("pass");
 
       const applyReq = makeRequest("/api/prs/432/review-resolutions/apply", {
         method: "POST",
@@ -855,11 +855,7 @@ describe("API Routes", () => {
         body: JSON.stringify({ threadId: "thread-verify" }),
       });
       const applyRes = await reviewApplyPOST(applyReq, { params: Promise.resolve({ id: "432" }) });
-      if (verifyData.verificationStatus === "pass") {
-        expect(applyRes.status).toBe(200);
-      } else {
-        expect(applyRes.status).toBe(422);
-      }
+      expect(applyRes.status).toBe(200);
     });
   });
 

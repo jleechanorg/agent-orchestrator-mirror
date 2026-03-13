@@ -131,11 +131,18 @@ export async function validateResolutionWithGit(
     }
   }
 
+  const gitValidationOptions =
+    workspacePath && record.fixCommitSha
+      ? {
+          isCommitReachable: (sha: string) => gitReachable.get(sha) ?? false,
+          getCommitTimestamp: (sha: string) => gitTimestamps.get(sha) ?? null,
+        }
+      : {};
+
   const blockers = validateResolutionRecord(record, thread ?? fallbackThread(record), {
     currentHeadSha: opts.headSha,
     requireEvidenceForBotThreads: opts.requireEvidenceForBotThreads,
-    isCommitReachable: (sha) => gitReachable.get(sha) ?? false,
-    getCommitTimestamp: (sha) => gitTimestamps.get(sha) ?? null,
+    ...gitValidationOptions,
   });
 
   return [...new Set(blockers)];
