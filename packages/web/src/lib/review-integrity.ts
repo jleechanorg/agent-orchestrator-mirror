@@ -49,15 +49,13 @@ export async function getThreadSnapshots(scm: SCM, pr: PRInfo): Promise<ReviewTh
   throw new Error("SCM does not support full review thread snapshots");
 }
 
-export function normalizeCheckState(status: CICheck["status"]): "passed" | "pending" | "failed" {
+function normalizeCheckState(status: CICheck["status"]): "passed" | "pending" | "failed" {
   if (status === "passed") return "passed";
   if (status === "pending" || status === "running") return "pending";
   return "failed";
 }
 
-export function buildCheckConclusions(
-  checks: CICheck[],
-): Map<string, "passed" | "pending" | "failed"> {
+function buildCheckConclusions(checks: CICheck[]): Map<string, "passed" | "pending" | "failed"> {
   const map = new Map<string, "passed" | "pending" | "failed">();
   for (const check of checks) {
     map.set(check.name, normalizeCheckState(check.status));
@@ -161,7 +159,7 @@ export async function evaluateMergeGuardForPR(input: {
 }> {
   const requiredChecks = [
     ...(input.requiredChecks ?? REVIEW_INTEGRITY_DEFAULTS.requiredChecks),
-  ].filter((name) => name !== "ao/merge-guard");
+  ].filter((name) => name !== "ao/merge-guard" && name !== "review-integrity");
 
   if (!input.scm.getReviewThreadSnapshots) {
     const checks = await input.scm.getCIChecks(input.pr);
