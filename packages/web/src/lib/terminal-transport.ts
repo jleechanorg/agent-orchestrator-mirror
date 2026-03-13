@@ -50,6 +50,10 @@ interface TerminalTransportSupervisorState {
   shutdownInstalled: boolean;
 }
 
+function isTransitionalStatus(status: TerminalTransportServiceStatus): boolean {
+  return status === "starting" || status === "restarting";
+}
+
 function getTsxCommand(cwd: string): string {
   const binName = process.platform === "win32" ? "tsx.cmd" : "tsx";
   return resolve(cwd, "node_modules", ".bin", binName);
@@ -298,8 +302,9 @@ async function ensureServiceHealthy(
     return;
   }
 
+  const hasRunningChild = Boolean(service.child && service.child.exitCode === null);
   service.status =
-    heal && service.child && service.status !== "healthy" ? service.status : "degraded";
+    hasRunningChild && isTransitionalStatus(service.status) ? service.status : "degraded";
   service.lastError = probe.error ?? `${definition.label} unavailable`;
   service.lastErrorAt = service.lastCheckedAt;
 
