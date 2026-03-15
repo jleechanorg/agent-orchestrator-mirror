@@ -23,10 +23,17 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-function normalizePermissionMode(mode: string | undefined): "permissionless" | "default" | "auto-edit" | "suggest" | undefined {
+function normalizePermissionMode(
+  mode: string | undefined,
+): "permissionless" | "default" | "auto-edit" | "suggest" | undefined {
   if (!mode) return undefined;
   if (mode === "skip") return "permissionless";
-  if (mode === "permissionless" || mode === "default" || mode === "auto-edit" || mode === "suggest") {
+  if (
+    mode === "permissionless" ||
+    mode === "default" ||
+    mode === "auto-edit" ||
+    mode === "suggest"
+  ) {
     return mode;
   }
   return undefined;
@@ -128,8 +135,9 @@ update_metadata_key() {
 # Strip leading directory-change prefixes so that commands like
 #   cd ~/.worktrees/project && gh pr create ...
 # are correctly detected. Agents frequently cd into a worktree first.
-# Store the regex pattern in a variable for clarity (avoids shell quoting confusion)
-cd_prefix_pattern='^[[:space:]]*cd[[:space:]]+[^&;]*[[:space:]]*(&&|;)[[:space:]]*(.*)'
+# Store the regex pattern in a variable for clarity.
+# Uses space-padded (&&|;) to avoid breaking on paths containing & or ; chars.
+cd_prefix_pattern='^[[:space:]]*cd[[:space:]]+.*[[:space:]]+(&&|;)[[:space:]]+(.*)'
 clean_command="$command"
 while [[ "$clean_command" =~ ^[[:space:]]*cd[[:space:]] ]]; do
   if [[ "$clean_command" =~ $cd_prefix_pattern ]]; then
@@ -312,8 +320,7 @@ async function parseJsonlFileTail(filePath: string, maxBytes = 131_072): Promise
   // Skip potentially truncated first line only when we started mid-file.
   // If offset === 0 we read from the start so the first line is complete.
   const firstNewline = content.indexOf("\n");
-  const safeContent =
-    offset > 0 && firstNewline >= 0 ? content.slice(firstNewline + 1) : content;
+  const safeContent = offset > 0 && firstNewline >= 0 ? content.slice(firstNewline + 1) : content;
   const lines: JsonlLine[] = [];
   for (const line of safeContent.split("\n")) {
     const trimmed = line.trim();
@@ -331,9 +338,7 @@ async function parseJsonlFileTail(filePath: string, maxBytes = 131_072): Promise
 }
 
 /** Extract auto-generated summary from JSONL (last "summary" type entry) */
-function extractSummary(
-  lines: JsonlLine[],
-): { summary: string; isFallback: boolean } | null {
+function extractSummary(lines: JsonlLine[]): { summary: string; isFallback: boolean } | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (line?.type === "summary" && line.summary) {

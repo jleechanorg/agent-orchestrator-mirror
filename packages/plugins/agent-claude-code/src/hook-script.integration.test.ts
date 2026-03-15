@@ -118,6 +118,24 @@ describe("hook script: gh pr create", () => {
     expect(metadata).toContain("status=pr_open");
   });
 
+  it("detects gh pr create with cd prefix and ampersand in quoted path", () => {
+    const { metadata } = runHook({
+      command: `cd '/tmp/a&b' && gh pr create --title "fix" --base master`,
+      output: prUrl,
+    });
+    expect(metadata).toContain(`pr=${prUrl}`);
+    expect(metadata).toContain("status=pr_open");
+  });
+
+  it("detects gh pr create with cd prefix and semicolon in quoted path", () => {
+    const { metadata } = runHook({
+      command: `cd '/tmp/semi;colon' && gh pr create --title "fix" --base master`,
+      output: prUrl,
+    });
+    expect(metadata).toContain(`pr=${prUrl}`);
+    expect(metadata).toContain("status=pr_open");
+  });
+
   it("does NOT update metadata when PR URL is missing from output", () => {
     const { metadata } = runHook({
       command: 'gh pr create --title "fix"',
