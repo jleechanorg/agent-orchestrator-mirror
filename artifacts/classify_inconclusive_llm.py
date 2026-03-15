@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Classify INCONCLUSIVE bug entries using Claude API (claude-sonnet-4-5).
+Classify INCONCLUSIVE bug entries using OpenAI API (gpt-4o-mini).
 Sends batches of 25 entries per API call for efficiency.
 """
 
@@ -10,10 +10,15 @@ import sys
 import time
 from pathlib import Path
 
-import anthropic
+# Set OPENAI_API_KEY environment variable before running
+if not os.environ.get("OPENAI_API_KEY"):
+    print("ERROR: OPENAI_API_KEY not set. Export it before running.")
+    sys.exit(1)
+
+from openai import OpenAI, RateLimitError, APIStatusError, AuthenticationError
 
 # --- Config ---
-MODEL = "claude-sonnet-4-5-20250514"
+MODEL = "gpt-5.4"
 BATCH_SIZE = 25
 MAX_RETRIES = 5
 BASE_DIR = Path("/private/tmp/verify_dashboard")
@@ -63,44 +68,44 @@ CATEGORIES = [
 ]
 
 CATEGORY_DESCRIPTIONS = """
-1. raw_response_in_error — Error handler returns raw response object instead of parsed error message
-2. raise_for_status_before_custom_handler — Calls raise_for_status() before custom error handling, bypassing it
-3. missing_conditional_validation — Missing validation for required conditional parameters
-4. url_path_not_encoded — URL path components not properly encoded (spaces, special chars)
-5. response_structure_mismatch — Code assumes wrong response JSON structure (wrong key names, nesting)
-6. response_json_on_non_json — Calls .json() on response that may not be JSON (204, text, etc.)
-7. wrong_data_semantics — Uses data field with wrong semantic meaning
-8. missing_input_validation — Required input parameters not validated before use
-9. pydantic_type_mismatch — Pydantic model field type doesn't match actual API data type
-10. parameter_silently_dropped — Parameter accepted but never sent to the API
-11. wrong_parameter_handling — Parameter processed/transformed incorrectly
-12. silent_error_suppression — Errors caught and silently swallowed with no logging
-13. nested_dict_as_query_param — Nested dict passed as query parameter (serializes to string)
-14. wrong_url_path — URL path is incorrect (wrong endpoint, missing segments)
-15. exclude_none_blocks_clearing — exclude_none prevents sending explicit null/empty to clear a field
-16. graphql_string_injection — User input interpolated directly into GraphQL query string
-17. wrong_field_name — Uses wrong field name in request or response handling
-18. pydantic_alias_serialization — Pydantic alias not used during serialization (by_alias=True missing)
-19. unhandled_response_format — Response format not handled (pagination, envelope, etc.)
-20. error_info_leak — Leaks sensitive info (tokens, keys) in error messages
-21. default_value_fabrication — Fabricates default values instead of requiring user input
-22. wrong_success_check — Checks wrong field/status for success determination
-23. truthiness_drops_falsy — Uses truthiness check that drops valid falsy values (0, "", False)
-24. hardcoded_value_overrides_input — Hardcoded value overrides user-provided input
-25. content_type_mismatch — Wrong Content-Type header for the request body format
-26. action_noop — Action does nothing useful (empty body, returns static data)
-27. hardcoded_region_or_endpoint — Region or endpoint URL is hardcoded instead of configurable
-28. wrong_exception_caught — Catches wrong exception type, missing the real errors
-29. pagination_broken — Pagination logic is broken (wrong cursor, missing loop, etc.)
-30. csv_format_not_implemented — CSV/file format handling not properly implemented
-31. ssl_verification_disabled — SSL certificate verification is disabled
-32. substring_operator_detection — Uses substring matching that can match wrong operators
-33. auth_handling_error — Authentication/authorization handling is incorrect
-34. streaming_not_handled — Streaming response not properly handled
-35. broken_fallback_logic — Fallback/default logic is broken or unreachable
-36. wrong_http_method — Uses wrong HTTP method (GET vs POST, etc.)
-37. graphql_incomplete_query — GraphQL query missing required fields or fragments
-38. other — Does not fit any of the above categories
+1. raw_response_in_error - Error handler returns raw response object instead of parsed error message
+2. raise_for_status_before_custom_handler - Calls raise_for_status() before custom error handling, bypassing it
+3. missing_conditional_validation - Missing validation for required conditional parameters
+4. url_path_not_encoded - URL path components not properly encoded (spaces, special chars)
+5. response_structure_mismatch - Code assumes wrong response JSON structure (wrong key names, nesting)
+6. response_json_on_non_json - Calls .json() on response that may not be JSON (204, text, etc.)
+7. wrong_data_semantics - Uses data field with wrong semantic meaning
+8. missing_input_validation - Required input parameters not validated before use
+9. pydantic_type_mismatch - Pydantic model field type doesn't match actual API data type
+10. parameter_silently_dropped - Parameter accepted but never sent to the API
+11. wrong_parameter_handling - Parameter processed/transformed incorrectly
+12. silent_error_suppression - Errors caught and silently swallowed with no logging
+13. nested_dict_as_query_param - Nested dict passed as query parameter (serializes to string)
+14. wrong_url_path - URL path is incorrect (wrong endpoint, missing segments)
+15. exclude_none_blocks_clearing - exclude_none prevents sending explicit null/empty to clear a field
+16. graphql_string_injection - User input interpolated directly into GraphQL query string
+17. wrong_field_name - Uses wrong field name in request or response handling
+18. pydantic_alias_serialization - Pydantic alias not used during serialization (by_alias=True missing)
+19. unhandled_response_format - Response format not handled (pagination, envelope, etc.)
+20. error_info_leak - Leaks sensitive info (tokens, keys) in error messages
+21. default_value_fabrication - Fabricates default values instead of requiring user input
+22. wrong_success_check - Checks wrong field/status for success determination
+23. truthiness_drops_falsy - Uses truthiness check that drops valid falsy values (0, "", False)
+24. hardcoded_value_overrides_input - Hardcoded value overrides user-provided input
+25. content_type_mismatch - Wrong Content-Type header for the request body format
+26. action_noop - Action does nothing useful (empty body, returns static data)
+27. hardcoded_region_or_endpoint - Region or endpoint URL is hardcoded instead of configurable
+28. wrong_exception_caught - Catches wrong exception type, missing the real errors
+29. pagination_broken - Pagination logic is broken (wrong cursor, missing loop, etc.)
+30. csv_format_not_implemented - CSV/file format handling not properly implemented
+31. ssl_verification_disabled - SSL certificate verification is disabled
+32. substring_operator_detection - Uses substring matching that can match wrong operators
+33. auth_handling_error - Authentication/authorization handling is incorrect
+34. streaming_not_handled - Streaming response not properly handled
+35. broken_fallback_logic - Fallback/default logic is broken or unreachable
+36. wrong_http_method - Uses wrong HTTP method (GET vs POST, etc.)
+37. graphql_incomplete_query - GraphQL query missing required fields or fragments
+38. other - Does not fit any of the above categories
 """
 
 
@@ -114,7 +119,6 @@ def build_prompt(batch_entries):
         action = entry.get("action", "unknown")
         evidence = entry.get("evidence", "") or ""
 
-        # Truncate very long fields
         scanner = scanner[:500]
         explanation = explanation[:500]
         evidence = evidence[:300]
@@ -144,66 +148,68 @@ Return ONLY the JSON array, no other text."""
 
 
 def classify_batch(client, batch_entries, batch_num, total_batches):
-    """Classify a batch of entries using Claude API with retries."""
+    """Classify a batch of entries using OpenAI API with retries."""
     prompt = build_prompt(batch_entries)
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=MODEL,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a bug classification assistant. Always respond with valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_completion_tokens=2048,
+                response_format={"type": "json_object"},
             )
-            text = response.content[0].text.strip()
+            text = response.choices[0].message.content.strip()
 
-            # Parse JSON - handle markdown code blocks
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1]
-                text = text.rsplit("```", 1)[0].strip()
+            # Parse JSON - handle both array and wrapped formats
+            parsed = json.loads(text)
 
-            categories = json.loads(text)
+            # Handle if model wraps in an object like {"categories": [...]}
+            if isinstance(parsed, dict):
+                for key in parsed:
+                    if isinstance(parsed[key], list):
+                        parsed = parsed[key]
+                        break
+                else:
+                    raise ValueError(f"JSON object has no array field: {list(parsed.keys())}")
+
+            categories = parsed
 
             if not isinstance(categories, list) or len(categories) != len(batch_entries):
                 print(f"  WARNING batch {batch_num}: expected {len(batch_entries)} results, got {len(categories) if isinstance(categories, list) else 'non-list'}")
                 if isinstance(categories, list) and len(categories) > 0:
-                    # Pad or truncate
                     while len(categories) < len(batch_entries):
                         categories.append("other")
                     categories = categories[: len(batch_entries)]
                 else:
                     raise ValueError("Invalid response format")
 
-            # Validate categories
             valid = set(CATEGORIES)
             categories = [c if c in valid else "other" for c in categories]
 
             return categories
 
-        except anthropic.AuthenticationError as e:
+        except AuthenticationError as e:
             print(f"  FATAL: Authentication error - invalid API key: {e}")
             sys.exit(1)
-        except anthropic.RateLimitError:
+        except RateLimitError:
             wait = 2 ** (attempt + 1)
             print(f"  Rate limited on batch {batch_num}, waiting {wait}s...")
             time.sleep(wait)
-        except anthropic.APIStatusError as e:
-            if e.status_code == 529:  # Overloaded
-                wait = 2 ** (attempt + 1)
-                print(f"  API overloaded on batch {batch_num}, waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"  API error on batch {batch_num}: {e}")
-                if attempt == MAX_RETRIES - 1:
-                    return ["other"] * len(batch_entries)
-                time.sleep(2)
+        except APIStatusError as e:
+            print(f"  API error on batch {batch_num} (attempt {attempt+1}): {e}")
+            if attempt == MAX_RETRIES - 1:
+                return ["other"] * len(batch_entries)
+            time.sleep(2)
         except (json.JSONDecodeError, ValueError) as e:
             print(f"  Parse error on batch {batch_num} (attempt {attempt+1}): {e}")
             if attempt == MAX_RETRIES - 1:
                 return ["other"] * len(batch_entries)
             time.sleep(1)
-        except UnicodeEncodeError as e:
-            print(f"  FATAL: Unicode encoding error (likely corrupted API key): {e}")
-            sys.exit(1)
         except Exception as e:
             print(f"  Unexpected error on batch {batch_num}: {type(e).__name__}: {e}")
             if attempt == MAX_RETRIES - 1:
@@ -213,33 +219,8 @@ def classify_batch(client, batch_entries, batch_num, total_batches):
     return ["other"] * len(batch_entries)
 
 
-def clean_api_key(key):
-    """Strip non-ASCII characters from API key (handles corrupted .env files)."""
-    return "".join(c for c in key if ord(c) < 128).strip()
-
-
 def main():
-    # Check API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        # Try common file locations
-        for path in [
-            Path.home() / ".anthropic" / "api_key",
-            Path.home() / ".config" / "anthropic" / "api_key",
-        ]:
-            if path.exists():
-                api_key = path.read_text().strip()
-                break
-
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY not found in environment or common locations.")
-        print("Set it with: export ANTHROPIC_API_KEY=sk-ant-...")
-        sys.exit(1)
-
-    # Clean non-ASCII characters from key
-    api_key = clean_api_key(api_key)
-
-    client = anthropic.Anthropic(api_key=api_key)
+    client = OpenAI()
 
     # Load data
     print("Loading data...")
@@ -263,11 +244,12 @@ def main():
             checkpoint = json.load(f)
         all_classifications = checkpoint.get("classifications", [])
         start_batch = len(all_classifications) // BATCH_SIZE
-        print(f"Resuming from checkpoint: {len(all_classifications)} entries already classified (batch {start_batch})")
+        print(f"Resuming from checkpoint: {len(all_classifications)} entries classified (batch {start_batch})")
 
     # Process in batches
     total_batches = (len(inconclusive) + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"Processing {total_batches} batches of ~{BATCH_SIZE} entries...")
+    remaining = total_batches - start_batch
+    print(f"Processing {remaining} remaining batches (of {total_batches} total, ~{BATCH_SIZE} entries each)...")
 
     start_time = time.time()
 
@@ -283,11 +265,12 @@ def main():
         if (batch_num + 1) % 10 == 0:
             with open(checkpoint_file, "w") as f:
                 json.dump({"classifications": all_classifications}, f)
-            print(f"  [checkpoint saved at batch {batch_num+1}]")
 
         elapsed = time.time() - start_time
-        rate = (batch_num + 1) / elapsed * 60 if elapsed > 0 else 0
-        print(f"  Batch {batch_num+1}/{total_batches} done ({batch_end}/{len(inconclusive)}) [{rate:.1f} batches/min]")
+        done = batch_num - start_batch + 1
+        rate = done / elapsed * 60 if elapsed > 0 else 0
+        eta = (remaining - done) / (done / elapsed) if done > 0 and elapsed > 0 else 0
+        print(f"  Batch {batch_num+1}/{total_batches} ({batch_end}/{len(inconclusive)}) [{rate:.1f} b/min, ETA {eta/60:.1f}m]")
 
     # Build results
     print("\nBuilding results...")
@@ -304,12 +287,10 @@ def main():
         })
         category_counts[cat] = category_counts.get(cat, 0) + 1
 
-    # Sort distribution
     sorted_dist = sorted(category_counts.items(), key=lambda x: -x[1])
     classified_count = sum(v for k, v in sorted_dist if k != "other")
     other_count = category_counts.get("other", 0)
 
-    # Build baseline comparison
     baseline_dist = {
         item["category"]: item for item in baseline.get("category_distribution", [])
     }
@@ -344,18 +325,16 @@ def main():
         json.dump(output, f, indent=2)
         f.write("\n")
 
-    # Clean up checkpoint
     if checkpoint_file.exists():
         checkpoint_file.unlink()
-        print("Checkpoint file removed.")
 
     print(f"\nResults saved to {OUTPUT_FILE}")
     print(f"\n{'='*60}")
-    print(f"SUMMARY")
+    print("SUMMARY")
     print(f"{'='*60}")
-    print(f"Total INCONCLUSIVE:  {len(inconclusive)}")
+    print(f"Total INCONCLUSIVE:     {len(inconclusive)}")
     print(f"Classified (non-other): {classified_count} ({classified_count/len(inconclusive)*100:.1f}%)")
-    print(f"Other:               {other_count} ({other_count/len(inconclusive)*100:.1f}%)")
+    print(f"Other:                  {other_count} ({other_count/len(inconclusive)*100:.1f}%)")
     print(f"\nTop categories:")
     for cat, count in sorted_dist[:15]:
         pct = count / len(inconclusive) * 100
