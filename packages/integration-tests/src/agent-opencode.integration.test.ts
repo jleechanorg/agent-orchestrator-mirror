@@ -195,7 +195,7 @@ describe("getLaunchCommand (integration)", () => {
     },
   };
 
-  it("generates correct command with subagent", () => {
+  it("generates correct command with subagent (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       subagent: "sisyphus",
@@ -205,47 +205,50 @@ describe("getLaunchCommand (integration)", () => {
     expect(cmd).toContain(
       "opencode run --format json --title 'AO:test-1' --agent 'sisyphus' --command true",
     );
-    expect(cmd).toContain("'fix the bug'");
-    expect(cmd).toContain("exec opencode --session \"$SES_ID\" --prompt 'fix the bug'");
-    expect(cmd).toContain("--agent 'sisyphus'");
+    // Task prompts are NOT inlined (post-launch delivery)
+    expect(cmd).not.toContain("'fix the bug'");
+    expect(cmd).toContain("exec opencode --session \"$SES_ID\" --agent 'sisyphus'");
+    expect(cmd).not.toContain("--prompt");
   });
 
-  it("generates correct command with systemPrompt", () => {
+  it("generates correct command with systemPrompt (only system prompt inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       systemPrompt: "You are an orchestrator",
       prompt: "do the task",
     });
     expect(cmd).toContain("opencode run --format json --title 'AO:test-1' --command true");
-    expect(cmd).toContain(
-      `exec opencode --session "$SES_ID" --prompt 'You are an orchestrator
-
-do the task'`,
-    );
+    // Only system prompt is inlined, task prompt is post-launch
+    expect(cmd).toContain(`exec opencode --session "$SES_ID" --prompt 'You are an orchestrator'`);
+    expect(cmd).not.toContain("do the task");
   });
 
-  it("generates correct command with systemPromptFile", () => {
+  it("generates correct command with systemPromptFile (only system prompt inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       systemPromptFile: "/tmp/orchestrator-prompt.md",
       prompt: "do the task",
     });
     expect(cmd).toContain("opencode run --format json --title 'AO:test-1' --command true");
+    // Only system prompt file is inlined, task prompt is post-launch
     expect(cmd).toContain(
-      "exec opencode --session \"$SES_ID\" --prompt \"$(cat '/tmp/orchestrator-prompt.md'; printf '\\n\\n'; printf %s 'do the task')\"",
+      'exec opencode --session "$SES_ID" --prompt "$(cat \'/tmp/orchestrator-prompt.md\')"',
     );
+    expect(cmd).not.toContain("do the task");
   });
 
-  it("generates correct command with model override", () => {
+  it("generates correct command with model override (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       model: "claude-sonnet-4-5-20250929",
       prompt: "do the task",
     });
     expect(cmd).toContain("--model 'claude-sonnet-4-5-20250929'");
+    expect(cmd).not.toContain("--prompt");
+    expect(cmd).not.toContain("do the task");
   });
 
-  it("combines subagent + systemPrompt + model + prompt", () => {
+  it("combines subagent + systemPrompt + model (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       subagent: "oracle",
@@ -258,9 +261,10 @@ do the task'`,
       "opencode run --format json --title 'AO:test-1' --agent 'oracle' --model 'gpt-5.2' --command true",
     );
     expect(cmd).toContain(
-      "exec opencode --session \"$SES_ID\" --prompt 'You are an expert\n\nreview this code' --agent 'oracle' --model 'gpt-5.2'",
+      "exec opencode --session \"$SES_ID\" --prompt 'You are an expert' --agent 'oracle' --model 'gpt-5.2'",
     );
     expect(cmd).toContain("--model 'gpt-5.2'");
+    expect(cmd).not.toContain("review this code");
   });
 
   it("systemPromptFile takes precedence over systemPrompt", () => {
@@ -304,14 +308,15 @@ do the task'`,
     expect(cmd).toContain("\"$(cat '/tmp/it'\\''s-prompt.md')\"");
   });
 
-  it("handles prompt with special shell characters", () => {
+  it("handles prompt with special shell characters (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       prompt: "fix  and `backtick` and 'quote'",
     });
     expect(cmd).toContain("opencode run --format json --title 'AO:test-1' --command true");
-    expect(cmd).toContain("fix  and `backtick`");
-    expect(cmd).toContain('exec opencode --session "$SES_ID" --prompt');
+    expect(cmd).toContain('exec opencode --session "$SES_ID"');
+    expect(cmd).not.toContain("fix  and `backtick`");
+    expect(cmd).not.toContain("--prompt");
   });
 
   it("handles empty prompt", () => {
@@ -325,27 +330,30 @@ do the task'`,
     expect(cmd).toContain("AO:test-1");
   });
 
-  it("handles prompt with newlines", () => {
+  it("handles prompt with newlines (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       prompt: "line1\nline2",
     });
     expect(cmd).toContain("opencode run --format json --title 'AO:test-1' --command true");
-    expect(cmd).toContain('exec opencode --session "$SES_ID" --prompt \'line1');
+    expect(cmd).toContain('exec opencode --session "$SES_ID"');
+    expect(cmd).not.toContain("line1");
+    expect(cmd).not.toContain("--prompt");
   });
 
-  it("uses run bootstrap launch for fresh sessions", () => {
+  it("uses run bootstrap launch for fresh sessions (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       prompt: "start work",
     });
     expect(cmd).toContain("--title 'AO:test-1'");
     expect(cmd).toContain("opencode run --format json --title 'AO:test-1' --command true");
-    expect(cmd).toContain("exec opencode --session \"$SES_ID\" --prompt 'start work'");
     expect(cmd).toContain('exec opencode --session "$SES_ID"');
+    expect(cmd).not.toContain("--prompt 'start work'");
+    expect(cmd).not.toContain("--prompt");
   });
 
-  it("uses --session when existing OpenCode session id is provided", () => {
+  it("uses --session when existing OpenCode session id is provided (task prompt not inlined)", () => {
     const cmd = agent.getLaunchCommand({
       ...baseConfig,
       projectConfig: {
@@ -356,7 +364,8 @@ do the task'`,
       },
       prompt: "continue",
     });
-    expect(cmd).toBe("opencode --session 'ses_abc123' --prompt 'continue'");
+    expect(cmd).toBe("opencode --session 'ses_abc123'");
+    expect(cmd).not.toContain("--prompt");
   });
 });
 
