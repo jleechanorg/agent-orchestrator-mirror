@@ -18,6 +18,7 @@ import type {
   Notifier,
   ActivityState,
   PRInfo,
+  SessionExitProof,
 } from "../types.js";
 
 let tmpDir: string;
@@ -926,6 +927,59 @@ describe("check (single session)", () => {
     expect(lm.getStates().get("app-1")).toBe("mergeable");
   });
 
+  it("detects merge_conflicts when approved + CI green but has conflicts", async () => {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: true,
+        noConflicts: false,
+        blockers: ["Merge conflict"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("merge_conflicts");
+  });
+
   it("throws for nonexistent session", async () => {
     vi.mocked(mockSessionManager.get).mockResolvedValue(null);
 
@@ -1020,6 +1074,169 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "CI is failing. Fix it.");
+  });
+
+  it("injects CI failure context into send-to-agent message", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI failed. Fix it. Details: {{context}}",
+        retries: 2,
+        escalateAfter: 2,
+      },
+    };
+
+    const failingChecks = [
+      {
+        name: "build",
+        status: "failed" as const,
+        url: "https://github.com/org/repo/runs/123",
+        conclusion: "FAILURE",
+      },
+      {
+        name: "test",
+        status: "failed" as const,
+        url: "https://github.com/org/repo/runs/124",
+        conclusion: "FAILURE",
+      },
+    ];
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn().mockResolvedValue(failingChecks),
+      getCISummary: vi.fn().mockResolvedValue("failing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify that context was injected with failing check names and URLs
+    expect(mockSessionManager.send).toHaveBeenCalled();
+    const sentMessage = mockSessionManager.send.mock.calls[0][1];
+    expect(sentMessage).toContain("CI failed. Fix it. Details:");
+    expect(sentMessage).toContain("build");
+    expect(sentMessage).toContain("test");
+    expect(sentMessage).toContain("https://github.com/org/repo/runs/123");
+  });
+
+  it("injects changes-requested context into send-to-agent message", async () => {
+    config.reactions = {
+      "changes-requested": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review changes requested. Address feedback: {{context}}",
+        retries: 2,
+        escalateAfter: 2,
+      },
+    };
+
+    const pendingComments = [
+      {
+        id: "1",
+        author: "reviewer",
+        body: "Please fix this function",
+        path: "src/utils.ts",
+        line: 42,
+        isResolved: false,
+        createdAt: new Date(),
+        url: "https://github.com/org/repo/pulls/42/files#42",
+      },
+      {
+        id: "2",
+        author: "reviewer",
+        body: "Consider using a different approach",
+        path: "src/main.ts",
+        line: 100,
+        isResolved: false,
+        createdAt: new Date(),
+        url: "https://github.com/org/repo/pulls/42/files#100",
+      },
+    ];
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("changes_requested"),
+      getPendingComments: vi.fn().mockResolvedValue(pendingComments),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "changes_requested", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "changes_requested",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify that context was injected with pending comment details
+    expect(mockSessionManager.send).toHaveBeenCalled();
+    const sentMessage = mockSessionManager.send.mock.calls[0][1];
+    expect(sentMessage).toContain("Review changes requested. Address feedback:");
+    expect(sentMessage).toContain("src/utils.ts");
+    expect(sentMessage).toContain("Please fix this function");
   });
 
   it("does not trigger reaction when auto=false", async () => {
@@ -1455,5 +1672,952 @@ describe("getStates", () => {
     // Modifying returned map shouldn't affect internal state
     states.set("app-1", "killed");
     expect(lm.getStates().get("app-1")).toBe("working");
+  });
+
+  it("calls scm.mergePR when auto-merge reaction is triggered and PR is mergeable", async () => {
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        mergeMethod: "squash",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSCM.getMergeability).toHaveBeenCalledWith(session.pr);
+    expect(mockSCM.mergePR).toHaveBeenCalledWith(session.pr, "squash");
+  });
+
+  it("does not merge when session has no PR", async () => {
+    // Even with auto-merge configured, if there's no PR, merge should not be attempted
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        mergeMethod: "merge",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    // Session with no PR
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // mergePR should not be called when there's no PR
+    expect(mockSCM.mergePR).not.toHaveBeenCalled();
+  });
+
+  it("uses default squash merge method when not specified", async () => {
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        // mergeMethod not specified - should default to squash
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSCM.mergePR).toHaveBeenCalledWith(session.pr, "squash");
+  });
+
+  it("auto-merge merges immediately and notifies of completion", async () => {
+    // auto-merge should merge automatically without waiting for approval
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        mergeMethod: "squash",
+      },
+    };
+
+    const mockNotifier: Notifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify that notifier was called once for success notification
+    expect(mockNotifier.notify).toHaveBeenCalledTimes(1);
+
+    // Call should be the success notification
+    const call = mockNotifier.notify.mock.calls[0][0];
+    expect(call.type).toBe("reaction.triggered");
+    expect(call.message).toContain("completed auto-merge");
+
+    // Verify merge was called immediately
+    expect(mockSCM.mergePR).toHaveBeenCalledWith(session.pr, "squash");
+  });
+
+  it("works with request-merge action (notifies human without merging)", async () => {
+    // request-merge should notify human for approval but NOT merge automatically
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "request-merge",
+        mergeMethod: "merge",
+      },
+    };
+
+    const mockNotifier: Notifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify that notifier was called once for approval request
+    expect(mockNotifier.notify).toHaveBeenCalledTimes(1);
+
+    // Call should be the approval request
+    const call = mockNotifier.notify.mock.calls[0][0];
+    expect(call.type).toBe("merge.approval_requested");
+
+    // Verify merge was NOT called (human must approve manually)
+    expect(mockSCM.mergePR).not.toHaveBeenCalled();
+  });
+});
+
+describe("session exit proof reconciliation (bd-uxs.6)", () => {
+  let mockNotifier: Notifier;
+
+  beforeEach(() => {
+    mockNotifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+
+    // Add notifier to config
+    config.notifiers = { desktop: mockNotifier };
+    config.notificationRouting = {
+      urgent: ["desktop"],
+      action: ["desktop"],
+      warning: ["desktop"],
+      info: ["desktop"],
+    };
+  });
+
+  it("emits session.exit_failed when no SCM is configured", async () => {
+    // Create a custom registry with notifier - this is critical
+    const testRegistry: PluginRegistry = {
+      register: vi.fn(),
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+      list: vi.fn().mockReturnValue([]),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    };
+
+    // Mock runtime as dead to trigger killed (terminal) status
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(false);
+
+    // Session starts as "working" so transition to "killed" triggers terminal event
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    // Write metadata with previous status (working) - check will transition to killed (terminal)
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: testRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify session transitioned to killed
+    expect(lm.getStates().get("app-1")).toBe("killed");
+
+    // Verify notifier was called with exit_failed event
+    expect(mockNotifier.notify).toHaveBeenCalled();
+    const call = mockNotifier.notify.mock.calls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "session.exit_failed",
+    );
+    expect(call).toBeDefined();
+    expect((call[0] as { type: string }).type).toBe("session.exit_failed");
+  });
+
+  it("emits session.exit_failed when SCM does not support validateCommits", async () => {
+    // SCM mock without validateCommits function
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+      // validateCommits is NOT defined - testing unsupported path
+    };
+
+    const testRegistry: PluginRegistry = {
+      register: vi.fn(),
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+      list: vi.fn().mockReturnValue([]),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    };
+
+    // Mock runtime as dead to trigger killed (terminal) status
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(false);
+
+    // Session starts as "working" so transition to "killed" triggers terminal event
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: testRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify session transitioned to killed
+    expect(lm.getStates().get("app-1")).toBe("killed");
+
+    // Verify notifier was called with exit_failed event (not validated)
+    expect(mockNotifier.notify).toHaveBeenCalled();
+    const call = mockNotifier.notify.mock.calls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "session.exit_failed",
+    );
+    expect(call).toBeDefined();
+    expect((call[0] as { type: string }).type).toBe("session.exit_failed");
+  });
+
+  it("emits session.exit_validated when validateCommits returns pushed=true", async () => {
+    // SCM mock with validateCommits that returns pushed=true
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+      validateCommits: vi.fn().mockResolvedValue({
+        pushed: true,
+        localCommits: [],
+        remoteCommits: ["abc123"],
+      }),
+    };
+
+    const testRegistry: PluginRegistry = {
+      register: vi.fn(),
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+      list: vi.fn().mockReturnValue([]),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    };
+
+    // Mock runtime as dead to trigger killed (terminal) status
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(false);
+
+    // Session starts as "working" so transition to "killed" triggers terminal event
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: testRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify session transitioned to killed
+    expect(lm.getStates().get("app-1")).toBe("killed");
+
+    // Verify notifier was called with exit_validated event
+    expect(mockNotifier.notify).toHaveBeenCalled();
+    const call = mockNotifier.notify.mock.calls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "session.exit_validated",
+    );
+    expect(call).toBeDefined();
+    expect((call[0] as { type: string }).type).toBe("session.exit_validated");
+  });
+
+  it("emits session.exit_failed when validateCommits returns pushed=false", async () => {
+    // SCM mock with validateCommits that returns pushed=false (local commits not pushed)
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+      validateCommits: vi.fn().mockResolvedValue({
+        pushed: false,
+        localCommits: ["abc123", "def456"],
+        remoteCommits: [],
+      }),
+    };
+
+    const testRegistry: PluginRegistry = {
+      register: vi.fn(),
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+      list: vi.fn().mockReturnValue([]),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    };
+
+    // Mock runtime as dead to trigger killed (terminal) status
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(false);
+
+    // Session starts as "working" so transition to "killed" triggers terminal event
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: testRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify notifier was called with exit_failed event (not exit_validated)
+    const call = mockNotifier.notify.mock.calls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "session.exit_failed",
+    );
+    expect(call).toBeDefined();
+    expect((call[0] as { type: string }).type).toBe("session.exit_failed");
+
+    // Verify the proof contains pushed=false
+    const eventData = (call[0] as { data?: { proof?: SessionExitProof } }).data;
+    expect(eventData?.proof?.commitsPushed).toBe(false);
+    expect(eventData?.proof?.localCommits).toEqual(["abc123", "def456"]);
+    expect(eventData?.proof?.remoteCommits).toEqual([]);
+  });
+
+  it("emits session.exit_failed when validateCommits throws an error", async () => {
+    // SCM mock with validateCommits that throws
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+      validateCommits: vi.fn().mockRejectedValue(new Error("Validation failed")),
+    };
+
+    const testRegistry: PluginRegistry = {
+      register: vi.fn(),
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+      list: vi.fn().mockReturnValue([]),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    };
+
+    // Mock runtime as dead to trigger killed (terminal) status
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(false);
+
+    // Session starts as "working" so transition to "killed" triggers terminal event
+    const session = makeSession({ status: "working", pr: null });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: testRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // Verify session transitioned to killed
+    expect(lm.getStates().get("app-1")).toBe("killed");
+
+    // Verify notifier was called with exit_failed event
+    expect(mockNotifier.notify).toHaveBeenCalled();
+    const call = mockNotifier.notify.mock.calls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "session.exit_failed",
+    );
+    expect(call).toBeDefined();
+    expect((call[0] as { type: string }).type).toBe("session.exit_failed");
+  });
+});
+
+describe("parallel-retry reaction (bd-uxs.4)", () => {
+  let mockNotifier: Notifier;
+  let mockSCM: SCM;
+
+  beforeEach(() => {
+    mockNotifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mockSCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("failing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    config.notifiers = { desktop: mockNotifier };
+    config.notificationRouting = {
+      urgent: ["desktop"],
+      action: ["desktop"],
+      warning: ["desktop"],
+      info: ["desktop"],
+    };
+  });
+
+  function makeRegistryWithScm(): PluginRegistry {
+    return {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name?: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+    };
+  }
+
+  it("does not pass the original branch to spawned retries (unique branch per session)", async () => {
+    // Regression test: passing branch: freshSession.branch causes git checkout to fail
+    // in worktree workspaces because the branch is already checked out by the original session.
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+        parallelRetry: { maxParallel: 2, strategies: ["codex", "claude-code"] },
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), branch: "feat/orig", issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockResolvedValue(makeSession({ id: "app-retry-1" }));
+
+    writeMetadata(sessionsDir, "app-1", { worktree: "/tmp", branch: "main", status: "pr_open", project: "my-app" });
+
+    const lm = createLifecycleManager({ config, registry: makeRegistryWithScm(), sessionManager: mockSessionManager });
+    await lm.check("app-1");
+
+    expect(mockSessionManager.spawn).toHaveBeenCalledTimes(2);
+    // branch must NOT be the original branch — let session-manager generate unique names
+    for (const call of vi.mocked(mockSessionManager.spawn).mock.calls) {
+      expect(call[0]).not.toHaveProperty("branch", "feat/orig");
+    }
+  });
+
+  it("spawns one session per strategy up to maxParallel", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+        parallelRetry: {
+          maxParallel: 2,
+          strategies: ["codex", "claude-code"],
+        },
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockResolvedValue(makeSession({ id: "app-retry-1" }));
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: makeRegistryWithScm(),
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.spawn).toHaveBeenCalledTimes(2);
+    expect(mockSessionManager.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "my-app", agent: "codex" }),
+    );
+    expect(mockSessionManager.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "my-app", agent: "claude-code" }),
+    );
+  });
+
+  it("respects maxParallel cap when more strategies are provided", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+        parallelRetry: {
+          maxParallel: 1,
+          strategies: ["codex", "claude-code", "aider"],
+        },
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockResolvedValue(makeSession({ id: "app-retry-1" }));
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: makeRegistryWithScm(),
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.spawn).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: "codex" }),
+    );
+  });
+
+  it("spawns one session with default agent when no parallelRetry config", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockResolvedValue(makeSession({ id: "app-retry-1" }));
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: makeRegistryWithScm(),
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.spawn).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "my-app" }),
+    );
+  });
+
+  it("notifies human with reaction.triggered event after spawning", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+        parallelRetry: {
+          maxParallel: 1,
+          strategies: ["codex"],
+        },
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockResolvedValue(makeSession({ id: "app-retry-1" }));
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: makeRegistryWithScm(),
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    const notifyCalls = vi.mocked(mockNotifier.notify).mock.calls;
+    const reactionCall = notifyCalls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "reaction.triggered",
+    );
+    expect(reactionCall).toBeDefined();
+  });
+
+  it("returns success=false when all spawns fail", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "parallel-retry",
+        parallelRetry: {
+          maxParallel: 2,
+          strategies: ["codex", "claude-code"],
+        },
+      },
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "42" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.spawn).mockRejectedValue(new Error("spawn failed"));
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: makeRegistryWithScm(),
+      sessionManager: mockSessionManager,
+    });
+
+    // Should not throw even when all spawns fail
+    await expect(lm.check("app-1")).resolves.toBeUndefined();
+
+    // Notifier should be called with a warning
+    const notifyCalls = vi.mocked(mockNotifier.notify).mock.calls;
+    const reactionCall = notifyCalls.find(
+      (c) => (c[0] as { type?: string } | undefined)?.type === "reaction.triggered",
+    );
+    expect(reactionCall).toBeDefined();
   });
 });

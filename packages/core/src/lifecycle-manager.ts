@@ -15,6 +15,7 @@ import {
   SESSION_STATUS,
   PR_STATE,
   CI_STATUS,
+  TERMINAL_STATUSES,
   type LifecycleManager,
   type SessionManager,
   type SessionId,
@@ -37,9 +38,15 @@ import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
 import { createCorrelationId, createProjectObserver } from "./observability.js";
 import { resolveAgentSelection, resolveSessionRole } from "./agent-selection.js";
+import type { OutcomeRecorder } from "./outcome-recorder.js";
+import { buildReactionContext } from "./reaction-context.js";
+import { validateAndEmitExitProof } from "./session-exit-proof.js";
+import { handleRequestMerge, handleParallelRetry } from "./fork-reaction-handlers.js";
+import { maybeDispatchReviewBacklog } from "./review-backlog.js";
+import { updateSessionMetadataHelper } from "./fork-utils.js";
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
-function parseDuration(str: string): number {
+export function parseDuration(str: string): number {
   const match = str.match(/^(\d+)(s|m|h)$/);
   if (!match) return 0;
   const value = parseInt(match[1], 10);
@@ -117,6 +124,8 @@ function statusToEventType(_from: SessionStatus | undefined, to: SessionStatus):
       return "review.approved";
     case "mergeable":
       return "merge.ready";
+    case "merge_conflicts":
+      return "merge.conflicts";
     case "merged":
       return "merge.completed";
     case "needs_input":
@@ -179,6 +188,8 @@ export interface LifecycleManagerDeps {
   sessionManager: SessionManager;
   /** When set, only poll sessions belonging to this project. */
   projectId?: string;
+  /** Optional outcome recorder for tracking session results. */
+  outcomeRecorder?: OutcomeRecorder;
 }
 
 /** Track attempt counts for reactions per session. */
@@ -189,7 +200,7 @@ interface ReactionTracker {
 
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
-  const { config, registry, sessionManager, projectId: scopedProjectId } = deps;
+  const { config, registry, sessionManager, projectId: scopedProjectId, outcomeRecorder } = deps;
   const observer = createProjectObserver(config, "lifecycle-manager");
 
   const states = new Map<SessionId, SessionStatus>();
@@ -328,6 +339,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           // and fire the merge.ready event / approved-and-green reaction.
           const mergeReady = await scm.getMergeability(session.pr);
           if (mergeReady.mergeable) return "mergeable";
+          // Check for merge conflicts — emit merge.conflicts event so users
+          // can configure reactions (e.g., send-to-agent to resolve conflicts)
+          if (!mergeReady.noConflicts) return "merge_conflicts";
           if (reviewDecision === "approved") return "approved";
         }
         if (reviewDecision === "pending") return "review_pending";
@@ -370,6 +384,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     projectId: string,
     reactionKey: string,
     reactionConfig: ReactionConfig,
+    session?: Session,
   ): Promise<ReactionResult> {
     const trackerKey = `${sessionId}:${reactionKey}`;
     let tracker = reactionTrackers.get(trackerKey);
@@ -426,13 +441,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       case "send-to-agent": {
         if (reactionConfig.message) {
           try {
-            await sessionManager.send(sessionId, reactionConfig.message);
+            // Inject context if message contains {{context}} placeholder
+            let finalMessage = reactionConfig.message;
+            if (session && reactionConfig.message.includes("{{context}}")) {
+              const context = await buildReactionContext(reactionKey, session, projectId, config, registry);
+              finalMessage = reactionConfig.message.replace(/\{\{context\}\}/g, () => context);
+            }
+            await sessionManager.send(sessionId, finalMessage);
 
             return {
               reactionType: reactionKey,
               success: true,
               action: "send-to-agent",
-              message: reactionConfig.message,
+              message: finalMessage,
               escalated: false,
             };
           } catch {
@@ -464,20 +485,119 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         };
       }
 
-      case "auto-merge": {
-        // Auto-merge is handled by the SCM plugin
-        // For now, just notify
-        const event = createEvent("reaction.triggered", {
-          sessionId,
-          projectId,
-          message: `Reaction '${reactionKey}' triggered auto-merge`,
-          data: { reactionKey },
+      case "request-merge": {
+        return handleRequestMerge(sessionId, projectId, reactionKey, reactionConfig, {
+          sessionManager, config, registry, notifyHuman, createEvent,
         });
-        await notifyHuman(event, "action");
+      }
+
+      case "auto-merge": {
+        // Get fresh session state for SCM operations
+        const freshSession = await sessionManager.get(sessionId);
+        if (!freshSession) {
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action,
+            escalated: false,
+          };
+        }
+
+        const project = config.projects[freshSession.projectId];
+        if (!project) {
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action,
+            escalated: false,
+          };
+        }
+
+        // Get SCM plugin
+        const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+        if (!scm || !freshSession.pr) {
+          // No SCM or no PR - just notify
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' triggered ${action} (no SCM/PR available)`,
+            data: { reactionKey, action },
+          });
+          await notifyHuman(event, "action");
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action,
+            escalated: false,
+          };
+        }
+
+        // Check mergeability before attempting
+        const mergeReadiness = await scm.getMergeability(freshSession.pr);
+        if (!mergeReadiness.mergeable) {
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' triggered ${action} but PR is not mergeable: ${mergeReadiness.blockers.join(", ")}`,
+            data: { reactionKey, action, blockers: mergeReadiness.blockers },
+          });
+          await notifyHuman(event, "action");
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action,
+            escalated: false,
+          };
+        }
+
+        // Auto-merge: execute merge immediately
+        const mergeMethod = reactionConfig.mergeMethod ?? "squash";
+        try {
+          await scm.mergePR(freshSession.pr, mergeMethod);
+
+          const successEvent = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' completed ${action} (${mergeMethod})`,
+            data: { reactionKey, action, mergeMethod },
+          });
+          await notifyHuman(successEvent, "action");
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action,
+            escalated: false,
+          };
+        } catch (error) {
+          const errorEvent = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' failed: ${error instanceof Error ? error.message : String(error)}`,
+            data: { reactionKey, action, error: error instanceof Error ? error.message : String(error) },
+          });
+          await notifyHuman(errorEvent, "action");
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action,
+            escalated: false,
+          };
+        }
+      }
+
+      case "parallel-retry": {
+        return handleParallelRetry(sessionId, projectId, reactionKey, reactionConfig, {
+          sessionManager, config, registry, notifyHuman, createEvent,
+        });
+      }
+
+      default: {
+        // Log warning for unknown reaction action types
+        console.warn(`Unknown reaction action type: ${action}`);
         return {
           reactionType: reactionKey,
-          success: true,
-          action: "auto-merge",
+          success: false,
+          action,
           escalated: false,
         };
       }
@@ -509,178 +629,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   }
 
   function updateSessionMetadata(session: Session, updates: Partial<Record<string, string>>): void {
-    const project = config.projects[session.projectId];
-    if (!project) return;
-
-    const sessionsDir = getSessionsDir(config.configPath, project.path);
-    updateMetadata(sessionsDir, session.id, updates);
-
-    const cleaned = Object.fromEntries(
-      Object.entries(session.metadata).filter(([key]) => {
-        const update = updates[key];
-        return update === undefined || update !== "";
-      }),
-    );
-    for (const [key, value] of Object.entries(updates)) {
-      if (value === undefined || value === "") continue;
-      cleaned[key] = value;
-    }
-    session.metadata = cleaned;
-  }
-
-  function makeFingerprint(ids: string[]): string {
-    return [...ids].sort().join(",");
-  }
-
-  async function maybeDispatchReviewBacklog(
-    session: Session,
-    oldStatus: SessionStatus,
-    newStatus: SessionStatus,
-    transitionReaction?: { key: string; result: ReactionResult | null },
-  ): Promise<void> {
-    const project = config.projects[session.projectId];
-    if (!project || !session.pr) return;
-
-    const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
-    if (!scm) return;
-
-    const humanReactionKey = "changes-requested";
-    const automatedReactionKey = "bugbot-comments";
-
-    if (newStatus === "merged" || newStatus === "killed") {
-      clearReactionTracker(session.id, humanReactionKey);
-      clearReactionTracker(session.id, automatedReactionKey);
-      updateSessionMetadata(session, {
-        lastPendingReviewFingerprint: "",
-        lastPendingReviewDispatchHash: "",
-        lastPendingReviewDispatchAt: "",
-        lastAutomatedReviewFingerprint: "",
-        lastAutomatedReviewDispatchHash: "",
-        lastAutomatedReviewDispatchAt: "",
-      });
-      return;
-    }
-
-    const [pendingResult, automatedResult] = await Promise.allSettled([
-      scm.getPendingComments(session.pr),
-      scm.getAutomatedComments(session.pr),
-    ]);
-
-    // null means "failed to fetch" — preserve existing metadata.
-    // [] means "confirmed no comments" — safe to clear.
-    const pendingComments =
-      pendingResult.status === "fulfilled" && Array.isArray(pendingResult.value)
-        ? pendingResult.value
-        : null;
-    const automatedComments =
-      automatedResult.status === "fulfilled" && Array.isArray(automatedResult.value)
-        ? automatedResult.value
-        : null;
-
-    // --- Pending (human) review comments ---
-    // null = SCM fetch failed; skip processing to preserve existing metadata.
-    if (pendingComments !== null) {
-      const pendingFingerprint = makeFingerprint(pendingComments.map((comment) => comment.id));
-      const lastPendingFingerprint = session.metadata["lastPendingReviewFingerprint"] ?? "";
-      const lastPendingDispatchHash = session.metadata["lastPendingReviewDispatchHash"] ?? "";
-
-      if (
-        pendingFingerprint !== lastPendingFingerprint &&
-        transitionReaction?.key !== humanReactionKey
-      ) {
-        clearReactionTracker(session.id, humanReactionKey);
-      }
-      if (pendingFingerprint !== lastPendingFingerprint) {
-        updateSessionMetadata(session, {
-          lastPendingReviewFingerprint: pendingFingerprint,
-        });
-      }
-
-      if (!pendingFingerprint) {
-        clearReactionTracker(session.id, humanReactionKey);
-        updateSessionMetadata(session, {
-          lastPendingReviewFingerprint: "",
-          lastPendingReviewDispatchHash: "",
-          lastPendingReviewDispatchAt: "",
-        });
-      } else if (
-        transitionReaction?.key === humanReactionKey &&
-        transitionReaction.result?.success
-      ) {
-        if (lastPendingDispatchHash !== pendingFingerprint) {
-          updateSessionMetadata(session, {
-            lastPendingReviewDispatchHash: pendingFingerprint,
-            lastPendingReviewDispatchAt: new Date().toISOString(),
-          });
-        }
-      } else if (
-        !(oldStatus !== newStatus && newStatus === "changes_requested") &&
-        pendingFingerprint !== lastPendingDispatchHash
-      ) {
-        const reactionConfig = getReactionConfigForSession(session, humanReactionKey);
-        if (
-          reactionConfig &&
-          reactionConfig.action &&
-          (reactionConfig.auto !== false || reactionConfig.action === "notify")
-        ) {
-          const result = await executeReaction(
-            session.id,
-            session.projectId,
-            humanReactionKey,
-            reactionConfig,
-          );
-          if (result.success) {
-            updateSessionMetadata(session, {
-              lastPendingReviewDispatchHash: pendingFingerprint,
-              lastPendingReviewDispatchAt: new Date().toISOString(),
-            });
-          }
-        }
-      }
-    }
-
-    // --- Automated (bot) review comments ---
-    if (automatedComments !== null) {
-      const automatedFingerprint = makeFingerprint(automatedComments.map((comment) => comment.id));
-      const lastAutomatedFingerprint = session.metadata["lastAutomatedReviewFingerprint"] ?? "";
-      const lastAutomatedDispatchHash = session.metadata["lastAutomatedReviewDispatchHash"] ?? "";
-
-      if (automatedFingerprint !== lastAutomatedFingerprint) {
-        clearReactionTracker(session.id, automatedReactionKey);
-        updateSessionMetadata(session, {
-          lastAutomatedReviewFingerprint: automatedFingerprint,
-        });
-      }
-
-      if (!automatedFingerprint) {
-        clearReactionTracker(session.id, automatedReactionKey);
-        updateSessionMetadata(session, {
-          lastAutomatedReviewFingerprint: "",
-          lastAutomatedReviewDispatchHash: "",
-          lastAutomatedReviewDispatchAt: "",
-        });
-      } else if (automatedFingerprint !== lastAutomatedDispatchHash) {
-        const reactionConfig = getReactionConfigForSession(session, automatedReactionKey);
-        if (
-          reactionConfig &&
-          reactionConfig.action &&
-          (reactionConfig.auto !== false || reactionConfig.action === "notify")
-        ) {
-          const result = await executeReaction(
-            session.id,
-            session.projectId,
-            automatedReactionKey,
-            reactionConfig,
-          );
-          if (result.success) {
-            updateSessionMetadata(session, {
-              lastAutomatedReviewDispatchHash: automatedFingerprint,
-              lastAutomatedReviewDispatchAt: new Date().toISOString(),
-            });
-          }
-        }
-      }
-    }
+    updateSessionMetadataHelper(session, updates, config);
   }
 
   /** Send a notification to all configured notifiers. */
@@ -758,6 +707,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
                 session.projectId,
                 reactionKey,
                 reactionConfig,
+                session,
               );
               transitionReaction = { key: reactionKey, result: reactionResult };
               // Reaction is handling this event — suppress immediate human notification.
@@ -788,7 +738,50 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       states.set(session.id, newStatus);
     }
 
-    await maybeDispatchReviewBacklog(session, oldStatus, newStatus, transitionReaction);
+    await maybeDispatchReviewBacklog(session, oldStatus, newStatus, {
+      config,
+      registry,
+      clearReactionTracker,
+      getReactionConfigForSession,
+      executeReaction,
+    }, transitionReaction);
+
+    // Session exit reconciliation (bd-uxs.6): validate commits and emit proof on terminal states
+    if (TERMINAL_STATUSES.has(newStatus) && !TERMINAL_STATUSES.has(oldStatus)) {
+      await validateAndEmitExitProof(session, newStatus, {
+        config,
+        registry,
+        observer,
+        notifyHuman,
+        createEvent,
+      });
+
+      // Record outcome for strategy learning (bd-nig)
+      // Guarded: disk errors must not break session lifecycle checks
+      if (outcomeRecorder) {
+        try {
+          const success = newStatus === "merged";
+          outcomeRecorder.record({
+            sessionId: session.id,
+            projectId: session.projectId,
+            trigger: session.metadata["trigger"] ?? "unknown",
+            action: session.metadata["action"] ?? "unknown",
+            strategy: session.metadata["strategy"],
+            errorClass: session.metadata["errorClass"],
+            success,
+            durationMs: Date.now() - new Date(session.createdAt).getTime(),
+            error: !success ? `Session ended with status: ${newStatus}` : undefined,
+            prNumber: session.pr?.number,
+            recordedAt: new Date().toISOString(),
+          });
+        } catch (recordErr) {
+          console.warn(
+            `Failed to record outcome for session ${session.id}:`,
+            recordErr instanceof Error ? recordErr.message : String(recordErr),
+          );
+        }
+      }
+    }
   }
 
   /** Run one polling cycle across all sessions. */
@@ -840,7 +833,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           const reactionConfig = config.reactions[reactionKey];
           if (reactionConfig && reactionConfig.action) {
             if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-              await executeReaction("system", "all", reactionKey, reactionConfig as ReactionConfig);
+              await executeReaction(
+                "system",
+                "all",
+                reactionKey,
+                reactionConfig as ReactionConfig,
+                undefined,
+              );
             }
           }
         }

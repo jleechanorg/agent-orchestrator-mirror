@@ -1,33 +1,5 @@
 #!/bin/bash
 
-set -uo pipefail
-
-FIX_MODE=false
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --fix)
-      FIX_MODE=true
-      ;;
-    -h|--help)
-      cat <<'EOF'
-Usage: ao doctor [--fix]
-
-Checks install, PATH, binaries, service health, stale temp files, and runtime sanity.
-
-Options:
-  --fix    Apply safe fixes for missing launcher links, missing support dirs, and stale temp files
-EOF
-      exit 0
-      ;;
-    *)
-      printf 'Unknown option: %s\n' "$1" >&2
-      exit 1
-      ;;
-  esac
-  shift
-done
-
 REPO_ROOT="${AO_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 DEFAULT_CONFIG_HOME="${HOME:-$REPO_ROOT}"
 PASS_COUNT=0
@@ -57,8 +29,8 @@ fixed() {
 
 expand_home() {
   case "$1" in
-    ~/*)
-      printf '%s/%s' "$DEFAULT_CONFIG_HOME" "${1#~/}"
+    "~/"*)
+      printf '%s/%s' "$DEFAULT_CONFIG_HOME" "${1#\~/}"
       ;;
     *)
       printf '%s' "$1"
@@ -261,12 +233,19 @@ check_install_layout() {
 }
 
 check_runtime_sanity() {
-  if [ ! -f "$REPO_ROOT/packages/agent-orchestrator/bin/ao.js" ]; then
+  # Check both legacy and current launcher paths
+  local launcher=""
+  if [ -f "$REPO_ROOT/packages/ao/bin/ao.js" ]; then
+    launcher="$REPO_ROOT/packages/ao/bin/ao.js"
+  elif [ -f "$REPO_ROOT/packages/agent-orchestrator/bin/ao.js" ]; then
+    launcher="$REPO_ROOT/packages/agent-orchestrator/bin/ao.js"
+  fi
+  if [ -z "$launcher" ]; then
     fail "launcher entrypoint is missing. Fix: reinstall from a clean checkout"
     return
   fi
 
-  if node "$REPO_ROOT/packages/agent-orchestrator/bin/ao.js" --version >/dev/null 2>&1; then
+  if node "$launcher" --version >/dev/null 2>&1; then
     pass "launcher runtime sanity check passed (ao --version)"
   else
     fail "launcher runtime sanity check failed. Fix: run pnpm build and refresh the launcher"
@@ -325,6 +304,39 @@ check_stale_temp_files() {
 
   warn "$stale_count stale temp files older than 60 minutes found under $temp_root. Fix: rerun ao doctor --fix"
 }
+
+FIX_MODE=false
+
+# Guard: return early when sourced (e.g., for unit tests) - after functions are defined
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
+set -uo pipefail
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fix)
+      FIX_MODE=true
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: ao doctor [--fix]
+
+Checks install, PATH, binaries, service health, stale temp files, and runtime sanity.
+
+Options:
+  --fix    Apply safe fixes for missing launcher links, missing support dirs, and stale temp files
+EOF
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 printf 'Agent Orchestrator Doctor\n\n'
 

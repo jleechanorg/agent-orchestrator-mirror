@@ -51,6 +51,14 @@ export type { SessionManagerDeps } from "./session-manager.js";
 export { createLifecycleManager } from "./lifecycle-manager.js";
 export type { LifecycleManagerDeps } from "./lifecycle-manager.js";
 
+// Failure budget tracker — tracks retry attempts and routes on exhaustion
+export { FailureBudgetTracker, routeExhaustedBudget } from "./failure-budget.js";
+export type { BudgetExhaustedDeps } from "./failure-budget.js";
+
+// Poller manager — outer initiation loop (bd-uxs.2)
+export { createPollerManager } from "./poller-manager.js";
+export type { PollerManagerDeps } from "./poller-manager.js";
+
 // Prompt builder — layered prompt composition
 export { buildPrompt, BASE_AGENT_PROMPT } from "./prompt-builder.js";
 export type { PromptBuildConfig } from "./prompt-builder.js";
@@ -177,3 +185,81 @@ export type {
   DetectedProjectInfo,
   GenerateConfigOptions,
 } from "./config-generator.js";
+
+// Webhook ingress — HMAC verification, dedup, and event queue (bd-c9h)
+export { WebhookIngress } from "./webhook-ingress.js";
+export type { WebhookIngressConfig } from "./webhook-ingress.js";
+
+// MCP agent mail — inter-agent guidance messaging (bd-qm6)
+export { AgentMailBridge, formatGuidancePrompt } from "./mcp-mail.js";
+export type { AgentMailMessage, AgentMailConfig } from "./mcp-mail.js";
+
+// Outcome recorder — persist and query fix strategy outcomes
+export { OutcomeRecorder } from "./outcome-recorder.js";
+export type { OutcomeRecorderDeps } from "./outcome-recorder.js";
+
+// Merge gate — 6-condition enforcement (bd-nrp)
+export { checkMergeGate } from "./merge-gate.js";
+export type { MergeGateCheck, MergeGateResult } from "./merge-gate.js";
+
+// Evidence bundle — structured evidence generation and review gate (bd-2gz)
+export {
+  generateEvidenceBundle,
+  reviewEvidenceBundle,
+  writeEvidenceBundle,
+} from "./evidence-bundle.js";
+export type {
+  EvidenceBundle,
+  CICheckEvidence,
+  EvidenceVerdict,
+} from "./evidence-bundle.js";
+
+// Parallel retry monitor (bd-tzt)
+export { ParallelRetryMonitor } from "./parallel-retry.js";
+export type { RaceGroup, RaceEntry } from "./parallel-retry.js";
+
+// Auto-resolve threads — resolve stale review threads after fix push (bd-xj8)
+export { autoResolveThreads } from "./auto-resolve-threads.js";
+export type {
+  AutoResolveConfig,
+  AutoResolveResult,
+  ResolvedThread,
+  SkippedThread,
+  ThreadError,
+  GraphQLExecutor,
+} from "./auto-resolve-threads.js";
+
+// Slack outbox — outbox queue + dead letter handling (bd-sw3)
+export { SlackOutbox } from "./slack-outbox.js";
+export type { OutboxEntry, OutboxConfig } from "./slack-outbox.js";
+
+// Pattern synthesizer — learn from outcomes (bd-89q)
+export {
+  PatternSynthesizer,
+} from "./pattern-synthesizer.js";
+export type {
+  SynthesizedPattern,
+  PatternStore,
+} from "./pattern-synthesizer.js";
+
+// =============================================================================
+// FORK-SPECIFIC EXPORTS (extracted from upstream files for isolation)
+// =============================================================================
+
+// Reaction context builder (extracted from lifecycle-manager)
+export { buildReactionContext } from "./reaction-context.js";
+
+// Session exit proof (extracted from lifecycle-manager)
+export { validateAndEmitExitProof, emitExitProofEvent } from "./session-exit-proof.js";
+export type { ExitProofDeps } from "./session-exit-proof.js";
+
+// Reaction handlers: request-merge, parallel-retry (extracted from lifecycle-manager)
+export { handleRequestMerge, handleParallelRetry } from "./fork-reaction-handlers.js";
+export type { ReactionHandlerDeps } from "./fork-reaction-handlers.js";
+
+// Review backlog dispatch (extracted from lifecycle-manager)
+export { maybeDispatchReviewBacklog } from "./review-backlog.js";
+export type { ReviewBacklogDeps } from "./review-backlog.js";
+
+// Shared fork utility: session metadata update helper
+export { updateSessionMetadataHelper } from "./fork-utils.js";
