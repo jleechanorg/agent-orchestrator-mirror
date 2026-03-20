@@ -65,6 +65,3 @@ AGENTS.md
 .claude/
 .opencode/
 
-# Dolt database files (added by bd init)
-.dolt/
-*.db
