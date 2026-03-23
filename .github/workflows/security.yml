@@ -34,7 +34,7 @@ jobs:
           curl -sSfLO "${BASE_URL}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           sha256sum --ignore-missing -c "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           tar -xzf "${ASSET}"
-          ./gitleaks detect --source . --verbose --exit-code 1
+          ./gitleaks detect --source . --verbose --redact --exit-code 1
 
   dependency-review:
     name: Dependency Review
@@ -44,9 +44,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # GitHub Dependency graph is required; mirror/fork repos often lack it and the action fails before severity checks.
+      # Dependency graph required; mirrors/forks may not support the action — non-blocking there via continue-on-error.
       - name: Dependency Review
-        if: github.repository == 'ComposioHQ/agent-orchestrator'
+        continue-on-error: ${{ github.repository != 'ComposioHQ/agent-orchestrator' }}
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: moderate
