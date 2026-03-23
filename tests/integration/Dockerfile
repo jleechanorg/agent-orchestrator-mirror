@@ -1,5 +1,5 @@
 # Integration test environment - simulates fresh developer machine
-FROM node:20-bookworm
+FROM node:22-bookworm
 
 # Install dependencies that a typical developer would have
 RUN apt-get update && apt-get install -y \

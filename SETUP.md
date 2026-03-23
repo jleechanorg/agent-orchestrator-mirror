@@ -6,10 +6,10 @@ Comprehensive guide to installing, configuring, and troubleshooting Agent Orches
 
 ### Required
 
-- **Node.js 20+** - Runtime for the orchestrator and CLI
+- **Node.js 22** - Runtime for the orchestrator and CLI (use `.nvmrc`; engines in `package.json` allow 20+)
 
   ```bash
-  node --version  # Should be v20.0.0 or higher
+  node --version  # Should be v22.x (see .nvmrc)
   ```
 
 - **Git 2.25+** - For repository management and worktrees
