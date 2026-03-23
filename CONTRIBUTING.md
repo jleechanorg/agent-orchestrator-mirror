@@ -27,7 +27,7 @@ Include:
 
 ## Development Setup
 
-**Prerequisites**: Node.js 20+, pnpm 9.15+, Git 2.25+, tmux, gh CLI
+**Prerequisites**: Node.js 22 (see `.nvmrc`; `package.json` engines still allow 20+), pnpm 9.15+, Git 2.25+, tmux, gh CLI
 
 ```bash
 git clone https://github.com/ComposioHQ/agent-orchestrator.git

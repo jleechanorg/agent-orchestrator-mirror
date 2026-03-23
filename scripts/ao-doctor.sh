@@ -150,7 +150,7 @@ check_command() {
 }
 
 check_node() {
-  if ! check_command "node" "required" "install Node.js 20+ and reopen your shell"; then
+  if ! check_command "node" "required" "install Node.js 22+ (see .nvmrc) and reopen your shell"; then
     return
   fi
   local version major
@@ -158,7 +158,7 @@ check_node() {
   major="${version#v}"
   major="${major%%.*}"
   if [ -z "$major" ] || [ "$major" -lt 20 ]; then
-    fail "Node.js 20+ is required, found ${version:-unknown}. Fix: install Node.js 20+"
+    fail "Node.js 20+ is required, found ${version:-unknown}. Fix: install Node.js 22+ (see .nvmrc)"
     return
   fi
   pass "Node.js version ${version} is supported"
