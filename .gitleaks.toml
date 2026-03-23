@@ -17,6 +17,8 @@ paths = [
   ".next/",
   "coverage/",
   "pnpm-lock.yaml",
+  # Removed sample/local config; historical value matched generic-api-key (false positive)
+  "^agent-orchestrator\\.yaml$",
 ]
 
 regexes = [
