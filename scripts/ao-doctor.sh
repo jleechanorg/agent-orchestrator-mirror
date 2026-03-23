@@ -158,7 +158,7 @@ check_node() {
   major="${version#v}"
   major="${major%%.*}"
   if [ -z "$major" ] || [ "$major" -lt 20 ]; then
-    fail "Node.js 20+ is required, found ${version:-unknown}. Fix: install Node.js 22+ (see .nvmrc)"
+    fail "Node.js 20+ is required (22 recommended — see .nvmrc / CI), found ${version:-unknown}"
     return
   fi
   pass "Node.js version ${version} is supported"

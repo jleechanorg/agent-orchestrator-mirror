@@ -146,7 +146,7 @@ Research into 16+ projects that orchestrate AI coding agents. The goal: understa
 ### claude-flow (ruvnet)
 
 - **GitHub**: https://github.com/ruvnet/claude-flow
-- **Stack**: TypeScript, Node.js 20+, WebAssembly, SQLite, PostgreSQL
+- **Stack**: TypeScript, Node.js 22+ (repo `.nvmrc`), WebAssembly, SQLite, PostgreSQL
 - **Claims**: 100K+ monthly active users, 84.8% SWE-Bench solve rate
 
 **Key Abstractions:**

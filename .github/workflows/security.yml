@@ -32,7 +32,7 @@ jobs:
           BASE_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
           curl -sSfLO "${BASE_URL}/${ASSET}"
           curl -sSfLO "${BASE_URL}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          grep " ${ASSET}$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum -c -
+          sha256sum --ignore-missing -c "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           tar -xzf "${ASSET}"
           ./gitleaks detect --source . --verbose --exit-code 1
 
