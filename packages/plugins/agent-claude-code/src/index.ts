@@ -73,8 +73,15 @@ const claudeConfig: AgentPluginConfig = {
 // An absolute path would cause each worktree to write a different command,
 // meaning the last writer clobbers others' settings on a shared .claude/ dir.
 const claudeOverrides: Partial<Agent> = {
-  async setupWorkspaceHooks(workspacePath: string, _config: WorkspaceHooksConfig): Promise<void> {
-    await setupHookInWorkspace(workspacePath, ".claude", ".claude/metadata-updater.sh");
+  async setupWorkspaceHooks(workspacePath: string, config: WorkspaceHooksConfig): Promise<void> {
+    // Bake AO_DATA_DIR into the hook command so the script resolves metadata
+    // files in the correct directory even when the env var is not set at
+    // hook-execution time. Relative script path keeps settings.json identical
+    // across worktrees sharing the same .claude/ dir.
+    const hookCommand = config.dataDir
+      ? `AO_DATA_DIR=${config.dataDir} .claude/metadata-updater.sh`
+      : ".claude/metadata-updater.sh";
+    await setupHookInWorkspace(workspacePath, ".claude", hookCommand);
   },
   async postLaunchSetup(session: Session): Promise<void> {
     if (!session.workspacePath) return;
