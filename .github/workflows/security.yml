@@ -18,8 +18,8 @@ jobs:
   gitleaks:
     name: Scan for Secrets
     runs-on: ubuntu-latest
-    # Skip if GITLEAKS_LICENSE is not configured
-    if: secrets.GITLEAKS_LICENSE != ''
+    # Temporarily disabled - requires GITLEAKS_LICENSE secret to be configured
+    if: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
