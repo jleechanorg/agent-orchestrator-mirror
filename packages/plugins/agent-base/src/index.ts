@@ -960,8 +960,11 @@ export function createAgentPlugin(config: AgentPluginConfig, overrides?: Partial
     ): Promise<void> {
       const hookScriptPath = join(workspacePath, config.configDir, "metadata-updater.sh");
       // Prefix AO_DATA_DIR so the hook writes to the configured data directory
-      // rather than the default $HOME/.ao-sessions.
-      const hookCommand = `AO_DATA_DIR=${shellEscape(hookConfig.dataDir)} ${shellEscape(hookScriptPath)}`;
+      // rather than the default $HOME/.ao-sessions. Skip the prefix when dataDir
+      // is absent so the command stays valid (no "AO_DATA_DIR=undefined ..." shell error).
+      const hookCommand = hookConfig.dataDir
+        ? `AO_DATA_DIR=${shellEscape(hookConfig.dataDir)} ${shellEscape(hookScriptPath)}`
+        : shellEscape(hookScriptPath);
       await setupHookInWorkspace(workspacePath, config.configDir, hookCommand, config.hookToolMatcher ?? "Bash", config.hookEvent ?? "PostToolUse");
     },
 
