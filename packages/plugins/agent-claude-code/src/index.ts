@@ -2,13 +2,11 @@ import {
   createAgentPlugin,
   toAgentProjectPath,
   resetPsCache as _resetPsCache,
-  setupHookInWorkspace,
   METADATA_UPDATER_SCRIPT as _METADATA_UPDATER_SCRIPT,
   type AgentPluginConfig,
 } from "@composio/ao-plugin-agent-base";
 import { execFileSync } from "node:child_process";
-import type { Agent, PluginModule, Session, WorkspaceHooksConfig } from "@composio/ao-core";
-import { shellEscape } from "@composio/ao-core";
+import type { Agent, PluginModule } from "@composio/ao-core";
 
 // =============================================================================
 // Plugin Manifest
@@ -69,29 +67,8 @@ const claudeConfig: AgentPluginConfig = {
 // Plugin Export
 // =============================================================================
 
-// Claude-specific hook setup overrides: use a relative path so that symlinked
-// .claude/ directories across worktrees all produce the same settings.json.
-// An absolute path would cause each worktree to write a different command,
-// meaning the last writer clobbers others' settings on a shared .claude/ dir.
-const claudeOverrides: Partial<Agent> = {
-  async setupWorkspaceHooks(workspacePath: string, config: WorkspaceHooksConfig): Promise<void> {
-    // Bake AO_DATA_DIR into the hook command so the script resolves metadata
-    // files in the correct directory even when the env var is not set at
-    // hook-execution time. Relative script path keeps settings.json identical
-    // across worktrees sharing the same .claude/ dir.
-    const hookCommand = config.dataDir
-      ? `AO_DATA_DIR=${shellEscape(config.dataDir)} .claude/metadata-updater.sh`
-      : ".claude/metadata-updater.sh";
-    await setupHookInWorkspace(workspacePath, ".claude", hookCommand);
-  },
-  async postLaunchSetup(session: Session): Promise<void> {
-    if (!session.workspacePath) return;
-    await setupHookInWorkspace(session.workspacePath, ".claude", ".claude/metadata-updater.sh");
-  },
-};
-
 export function create(): Agent {
-  return createAgentPlugin(claudeConfig, claudeOverrides);
+  return createAgentPlugin(claudeConfig);
 }
 
 /** Reset the ps process cache. Exported for testing only. */

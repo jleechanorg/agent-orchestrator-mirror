@@ -386,7 +386,7 @@ export async function parseJsonlFileTail(filePath: string, maxBytes = 131_072): 
 }
 
 function escapeHookMatcherForBash(matcher: string): string {
-  return matcher.replace(/\\/g, "\\\\").replace(/["$]/g, "\\$&");
+  return matcher.replace(/\\/g, "\\\\").replace(/["`$]/g, "\\$&");
 }
 
 /** Extract auto-generated summary from JSONL (last "summary" type entry) */
