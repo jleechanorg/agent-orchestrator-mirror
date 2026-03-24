@@ -18,8 +18,8 @@ jobs:
   gitleaks:
     name: Scan for Secrets
     runs-on: ubuntu-latest
-    # Temporarily disabled - requires GITLEAKS_LICENSE secret to be configured
-    if: false
+    # Requires GITLEAKS_LICENSE secret to be configured
+    if: vars.ENABLE_GITLEAKS == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,8 +35,8 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    # Skip - requires org-level Dependency Graph to be enabled
-    if: false
+    # Requires org-level Dependency Graph to be enabled
+    if: vars.ENABLE_DEPENDENCY_REVIEW == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
