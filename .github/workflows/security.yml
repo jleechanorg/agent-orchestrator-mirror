@@ -18,6 +18,8 @@ jobs:
   gitleaks:
     name: Scan for Secrets
     runs-on: ubuntu-latest
+    # Skip if GITLEAKS_LICENSE is not configured
+    if: secrets.GITLEAKS_LICENSE != ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,7 +35,8 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Skip - requires org-level Dependency Graph to be enabled
+    if: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
