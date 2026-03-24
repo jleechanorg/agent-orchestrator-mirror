@@ -35,8 +35,7 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    # Requires org-level Dependency Graph to be enabled
-    if: vars.ENABLE_DEPENDENCY_REVIEW == 'true'
+    if: github.event_name == 'pull_request' && vars.ENABLE_DEPENDENCY_REVIEW == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
