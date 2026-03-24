@@ -70,10 +70,18 @@ describe.skipIf(!canRun)("agent-gemini (integration)", () => {
 
     const task = `Write a Python fibonacci program to the file fibonacci.py. The program should print the first 10 fibonacci numbers when run. Write only the file, no explanation.`;
     // --yolo skips all permission prompts; -p runs in one-shot (non-interactive) mode.
-    // Auth via OAuth (oauth-personal) — no env var needed.
+    // --allowed-mcp-server-names with a non-existent name skips all MCP server loading,
+    // which otherwise adds ~60s of startup latency per run (all MCP servers load on init).
+    // Forward auth env vars so the tmux session uses the same Google Cloud project as
+    // the test runner (the tmux server may have a stale GOOGLE_CLOUD_PROJECT that does
+    // not have cloudaicompanion.googleapis.com enabled, causing OAuth 403 errors).
     // Pass task via $TASK env var to avoid shell quoting / injection issues.
-    const cmd = `${geminiBin} --yolo -p "$TASK"`;
-    await createSession(sessionName, cmd, tmpDir, { TASK: task });
+    const cmd = `${geminiBin} --yolo --allowed-mcp-server-names _ao_inttest_no_mcp -p "$TASK"`;
+    const sessionEnv: Record<string, string> = { TASK: task };
+    for (const key of ["GEMINI_API_KEY", "GOOGLE_CLOUD_PROJECT", "GOOGLE_PROJECT_ID"]) {
+      if (process.env[key]) sessionEnv[key] = process.env[key]!;
+    }
+    await createSession(sessionName, cmd, tmpDir, sessionEnv);
 
     const handle = makeTmuxHandle(sessionName);
     const session = makeSession("inttest-gemini", handle, tmpDir);
@@ -90,9 +98,9 @@ describe.skipIf(!canRun)("agent-gemini (integration)", () => {
       aliveSessionInfo = await agent.getSessionInfo(session);
     }
 
-    // Wait for agent to exit (up to 2 min)
+    // Wait for agent to exit (up to 3 min — Gemini loads MCPs before executing, adding ~60s startup)
     exitedRunning = await pollUntilEqual(() => agent.isProcessRunning(handle), false, {
-      timeoutMs: 120_000,
+      timeoutMs: 180_000,
       intervalMs: 2_000,
     });
 
@@ -107,7 +115,7 @@ describe.skipIf(!canRun)("agent-gemini (integration)", () => {
     } catch {
       fileCreated = false;
     }
-  }, 150_000);
+  }, 220_000);
 
   afterAll(async () => {
     await killSession(sessionName);
