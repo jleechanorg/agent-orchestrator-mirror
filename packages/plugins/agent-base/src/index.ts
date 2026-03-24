@@ -515,7 +515,7 @@ export async function getCachedProcessList(): Promise<string> {
   // Guard both callbacks so they only update psCache if it still belongs to
   // this request — a newer request may have replaced it while we were waiting.
   const promise = execFileAsync("ps", ["-eo", "pid,tty,args"], {
-    timeout: 30_000,
+    timeout: 5_000,
   }).then(({ stdout }) => {
     if (psCache?.promise === promise) {
       psCache = { output: stdout, timestamp: Date.now() };

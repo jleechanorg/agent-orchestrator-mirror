@@ -8,7 +8,7 @@ import {
   type AgentPluginConfig,
 } from "@composio/ao-plugin-agent-base";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat, open } from "node:fs/promises";
 import type { Agent, ActivityDetection, AgentSessionInfo, PluginModule, ProjectConfig, Session } from "@composio/ao-core";
 import { DEFAULT_READY_THRESHOLD_MS } from "@composio/ao-core";
 import { createHash } from "node:crypto";
@@ -91,49 +91,66 @@ const geminiConfig: AgentPluginConfig = {
  *   "error"  → error occurred               → blocked
  *   "info"   → informational progress       → active
  */
+
+/** Max bytes to read from the tail of a Gemini session file for activity detection. */
+const ACTIVITY_TAIL_BYTES = 131_072; // 128KB — enough to find the last message type
+
 async function readLastGeminiEntry(
   filePath: string,
   fileMtime: Date,
 ): Promise<{ lastType: string | null; modifiedAt: Date } | null> {
   try {
-    const content = await readFile(filePath, "utf-8");
+    // Read only the tail of the file to avoid loading multi-MB session files.
+    const { size = 0 } = await stat(filePath);
+    if (size === 0) return null;
+
+    let content: string;
+    const offset = Math.max(0, size - ACTIVITY_TAIL_BYTES);
+    if (offset === 0) {
+      content = await readFile(filePath, "utf-8");
+    } else {
+      // Large file — read only the tail via a file handle
+      const handle = await open(filePath, "r");
+      try {
+        const length = size - offset;
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, offset);
+        content = buffer.slice(0, bytesRead).toString("utf-8");
+      } finally {
+        await handle.close();
+      }
+    }
+
     const trimmed = content.trim();
     if (!trimmed) return null;
 
-    // Try native Gemini JSON: top-level object with messages array
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        const obj = parsed as Record<string, unknown>;
-        if (Array.isArray(obj.messages)) {
-          // This is a native Gemini JSON file — do not fall through to JSONL
-          if (obj.messages.length === 0) return null;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lastMsg = obj.messages[obj.messages.length - 1] as any;
-          const lastType = typeof lastMsg?.type === "string" ? lastMsg.type : null;
-          return { lastType, modifiedAt: fileMtime };
-        }
-      }
-    } catch {
-      // Not valid JSON — fall through to JSONL
-    }
-
-    // Fall back to JSONL: read last non-empty line
-    const lines = trimmed.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]?.trim();
-      if (!line) continue;
+    // For small files (read in full), try full JSON parse first.
+    if (offset === 0) {
       try {
-        const parsed: unknown = JSON.parse(line);
+        const parsed: unknown = JSON.parse(trimmed);
         if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
           const obj = parsed as Record<string, unknown>;
-          const lastType = typeof obj.type === "string" ? obj.type : null;
-          return { lastType, modifiedAt: fileMtime };
+          if (Array.isArray(obj.messages)) {
+            if (obj.messages.length === 0) return null;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const lastMsg = obj.messages[obj.messages.length - 1] as any;
+            const lastType = typeof lastMsg?.type === "string" ? lastMsg.type : null;
+            return { lastType, modifiedAt: fileMtime };
+          }
         }
       } catch {
-        // Skip malformed lines
+        // Not valid JSON — fall through to tail search
       }
     }
+
+    // Tail search: find the last "type": "..." pattern in the content.
+    // Works for both truncated native JSON and JSONL formats.
+    const typeMatches = [...content.matchAll(/"type"\s*:\s*"([^"]+)"/g)];
+    if (typeMatches.length > 0) {
+      const lastType = typeMatches[typeMatches.length - 1]![1] ?? null;
+      return { lastType, modifiedAt: fileMtime };
+    }
+
     return null;
   } catch {
     return null;
@@ -213,7 +230,16 @@ const geminiOverrides: Partial<Agent> = {
     if (!latest) return null;
 
     // Try native Gemini JSON first: { sessionId, messages: [{type, content, ...}] }
+    // Guard: skip full-file parse for files > 2MB to avoid loading huge sessions.
+    // Fall through to JSONL tail-read which only reads the last 128KB.
+    const MAX_SESSION_INFO_BYTES = 2 * 1024 * 1024;
+    let fileSize = 0;
     try {
+      const s = await stat(latest.path);
+      fileSize = s.size ?? 0;
+    } catch { /* will fail on readFile below */ }
+
+    if (fileSize <= MAX_SESSION_INFO_BYTES) try {
       const content = await readFile(latest.path, "utf-8");
       const trimmed = content.trim();
       if (!trimmed) return null;

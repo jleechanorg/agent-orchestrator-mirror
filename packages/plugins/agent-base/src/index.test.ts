@@ -18,7 +18,6 @@ const mockWriteFile = vi.fn();
 const mockChmod = vi.fn();
 const mockAccess = vi.fn();
 const mockOpen = vi.fn();
-const _mockClose = vi.fn();
 const mockExistsSync = vi.fn(() => false);
 
 vi.mock("node:fs/promises", () => ({
