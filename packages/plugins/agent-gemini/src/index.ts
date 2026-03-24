@@ -261,7 +261,8 @@ const geminiOverrides: Partial<Agent> = {
           const summary =
             typeof lastGemini?.["content"] === "string" ? lastGemini["content"] : null;
 
-          return { summary, agentSessionId, cost: undefined };
+          // Native Gemini summary is always a real agent response, never a user-message fallback.
+          return { summary, summaryIsFallback: false, agentSessionId, cost: undefined };
         }
       }
     } catch {
