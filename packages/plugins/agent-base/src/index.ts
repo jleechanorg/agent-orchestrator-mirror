@@ -958,27 +958,25 @@ export function createAgentPlugin(config: AgentPluginConfig, overrides?: Partial
       workspacePath: string,
       hookConfig: WorkspaceHooksConfig,
     ): Promise<void> {
-      const hookScriptPath = join(workspacePath, config.configDir, "metadata-updater.sh");
+      // Use a relative script path so that symlinked config dirs across worktrees
+      // all produce the same hook command in settings.json — an absolute path would
+      // differ per worktree and the last writer clobbers others' settings.
+      const relHookScript = `${config.configDir}/metadata-updater.sh`;
       // Prefix AO_DATA_DIR so the hook writes to the configured data directory
       // rather than the default $HOME/.ao-sessions. Skip the prefix when dataDir
       // is absent so the command stays valid (no "AO_DATA_DIR=undefined ..." shell error).
       const hookCommand = hookConfig.dataDir
-        ? `AO_DATA_DIR=${shellEscape(hookConfig.dataDir)} ${shellEscape(hookScriptPath)}`
-        : shellEscape(hookScriptPath);
+        ? `AO_DATA_DIR=${shellEscape(hookConfig.dataDir)} ${relHookScript}`
+        : relHookScript;
       await setupHookInWorkspace(workspacePath, config.configDir, hookCommand, config.hookToolMatcher ?? "Bash", config.hookEvent ?? "PostToolUse");
     },
 
     async postLaunchSetup(session: Session): Promise<void> {
       if (!session.workspacePath) return;
-      const hookScriptPath = join(
-        session.workspacePath,
-        config.configDir,
-        "metadata-updater.sh",
-      );
-      // Do NOT set AO_DATA_DIR here — the agent inherits it from its launch environment.
-      // Overwriting it here would clobber the correct sessions-dir set at spawn time.
-      const hookCommand = shellEscape(hookScriptPath);
-      await setupHookInWorkspace(session.workspacePath, config.configDir, hookCommand, config.hookToolMatcher ?? "Bash", config.hookEvent ?? "PostToolUse");
+      // Use a relative script path — see setupWorkspaceHooks comment above.
+      // Do NOT set AO_DATA_DIR here; the agent inherits it from its launch environment.
+      const relHookScript = `${config.configDir}/metadata-updater.sh`;
+      await setupHookInWorkspace(session.workspacePath, config.configDir, relHookScript, config.hookToolMatcher ?? "Bash", config.hookEvent ?? "PostToolUse");
     },
 
     ...overrides,
