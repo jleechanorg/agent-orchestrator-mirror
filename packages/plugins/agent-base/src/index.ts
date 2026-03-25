@@ -98,6 +98,12 @@ export interface AgentPluginConfig {
    * @default false
    */
   unsetClaudeEnv?: boolean;
+  /**
+   * Additional flags appended to the launch command after permissionlessFlag.
+   * Use for agent-specific flags that are always required (e.g. ["--trust"] for
+   * cursor-agent to suppress the interactive workspace-trust prompt).
+   */
+  extraLaunchFlags?: string[];
 }
 
 // =============================================================================
@@ -778,6 +784,10 @@ export function createAgentPlugin(config: AgentPluginConfig, overrides?: Partial
       const permissionMode = normalizePermissionMode(launchConfig.permissions);
       if (permissionMode === "permissionless" || permissionMode === "auto-edit") {
         parts.push(config.permissionlessFlag);
+      }
+
+      if (config.extraLaunchFlags) {
+        parts.push(...config.extraLaunchFlags);
       }
 
       if (launchConfig.model) {

@@ -143,7 +143,7 @@ describe("getLaunchCommand", () => {
 
   it("generates base command without shell syntax", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ permissions: "default" }));
-    expect(cmd).toBe("cursor-agent");
+    expect(cmd).toBe("cursor-agent --trust");
     // Must not contain shell operators (execFile-safe)
     expect(cmd).not.toContain("&&");
     expect(cmd).not.toContain("unset");
@@ -181,7 +181,7 @@ describe("getLaunchCommand", () => {
     const cmd = agent.getLaunchCommand(
       makeLaunchConfig({ permissions: "permissionless", model: "opus", prompt: "Hello" }),
     );
-    expect(cmd).toBe("cursor-agent --force --model 'opus'");
+    expect(cmd).toBe("cursor-agent --force --trust --model 'opus'");
   });
 
   it("omits --force when permissions=default", () => {

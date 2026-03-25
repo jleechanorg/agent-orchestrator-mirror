@@ -38,8 +38,10 @@ const cursorConfig: AgentPluginConfig = {
   processName: "cursor-agent",
   command: "cursor-agent",
   configDir: ".cursor",
-  // Cursor Agent CLI uses --force (equivalent of --yolo / --dangerously-skip-permissions)
+  // Cursor Agent CLI uses --force (equivalent of --yolo / --dangerously-skip-permissions).
   permissionlessFlag: "--force",
+  // --trust suppresses the interactive workspace-trust prompt on first run in a new directory.
+  extraLaunchFlags: ["--trust"],
   // Cursor Agent CLI does not support a system prompt flag;
   // system prompts are delivered post-launch via sendMessage().
   systemPromptFlag: undefined,
