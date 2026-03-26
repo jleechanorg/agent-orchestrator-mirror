@@ -14,6 +14,10 @@ import {
   type Session,
   type WorkspaceHooksConfig,
 } from "@composio/ao-core";
+import {
+  resetPsCache as _resetPsCache,
+  getCachedProcessList,
+} from "@composio/ao-plugin-agent-base";
 import { execFile, execFileSync } from "node:child_process";
 import { readdir, readFile, stat, open, writeFile, mkdir, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -86,6 +90,12 @@ if [[ -z "\${AO_SESSION:-}" ]]; then
   exit 0
 fi
 
+# Validate AO_SESSION: whitelist alphanumeric, hyphen, underscore only (prevents path traversal)
+if [[ ! "$AO_SESSION" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo '{"systemMessage": "AO_SESSION contains invalid characters, skipping metadata update"}'
+  exit 0
+fi
+
 # Construct metadata file path
 # AO_DATA_DIR is already set to the project-specific sessions directory
 metadata_file="$AO_DATA_DIR/$AO_SESSION"
@@ -101,20 +111,22 @@ update_metadata_key() {
   local key="$1"
   local value="$2"
 
-  # Create temp file
-  local temp_file="\${metadata_file}.tmp"
+  # Create temp file with PID for atomic updates under concurrency
+  local temp_file="\${metadata_file}.tmp.$$"
 
-  # Escape special sed characters in value (& | / \\)
-  local escaped_value=$(echo "$value" | sed 's/[&|\\/]/\\\\&/g')
+  # Sanitize: strip newlines to prevent metadata format corruption (key=value per line)
+  local safe_value=$(printf '%s' "$value" | tr -d $'\\n')
+  # Escape for sed replacement only (& | \\ — we use | as delimiter so / not needed)
+  local escaped_value=$(printf '%s' "$safe_value" | sed 's/[&|\\\\]/\\\\&/g')
 
   # Check if key already exists
   if grep -q "^$key=" "$metadata_file" 2>/dev/null; then
-    # Update existing key
+    # Update existing key (sed needs escaped value)
     sed "s|^$key=.*|$key=$escaped_value|" "$metadata_file" > "$temp_file"
   else
-    # Append new key
+    # Append new key (echo writes literally — use safe_value, not escaped)
     cp "$metadata_file" "$temp_file"
-    echo "$key=$value" >> "$temp_file"
+    echo "$key=$safe_value" >> "$temp_file"
   fi
 
   # Atomic replace
@@ -412,54 +424,11 @@ function extractCost(lines: JsonlLine[]): CostEstimate | undefined {
 // Process Detection
 // =============================================================================
 
-/**
- * TTL cache for `ps -eo pid,tty,args` output. Without this, listing N sessions
- * would spawn N concurrent `ps` processes, each taking 30+ seconds on machines
- * with many processes. The cache ensures `ps` is called at most once per TTL
- * window regardless of how many sessions are being enriched.
- */
-let psCache: { output: string; timestamp: number; promise?: Promise<string> } | null = null;
-const PS_CACHE_TTL_MS = 5_000;
-
-/** Reset the ps cache. Exported for testing only. */
+/** Reset the shared agent-base ps cache. Exported for testing only. */
 export function resetPsCache(): void {
-  psCache = null;
+  _resetPsCache();
 }
-
-async function getCachedProcessList(): Promise<string> {
-  const now = Date.now();
-  if (psCache && now - psCache.timestamp < PS_CACHE_TTL_MS) {
-    // Cache hit — return resolved output or wait for in-flight request
-    if (psCache.promise) return psCache.promise;
-    return psCache.output;
-  }
-
-  // Cache miss or expired — start a single `ps` call and share the promise.
-  // Guard both callbacks so they only update psCache if it still belongs to
-  // this request — a newer request may have replaced it while we were waiting.
-  const promise = execFileAsync("ps", ["-eo", "pid,tty,args"], {
-    timeout: 5_000,
-  }).then(({ stdout }) => {
-    if (psCache?.promise === promise) {
-      psCache = { output: stdout, timestamp: Date.now() };
-    }
-    return stdout;
-  });
-
-  // Store the in-flight promise so concurrent callers share it
-  psCache = { output: "", timestamp: now, promise };
-
-  try {
-    return await promise;
-  } catch {
-    // On failure, clear cache so the next caller retries — but only if
-    // psCache still points to this request (avoid clobbering a newer entry)
-    if (psCache?.promise === promise) {
-      psCache = null;
-    }
-    return "";
-  }
-}
+// getCachedProcessList is imported from agent-base so all plugins share one ps cache.
 
 /**
  * Check if a process named "claude" is running in the given runtime handle's context.
@@ -693,6 +662,7 @@ function createClaudeCodeAgent(): Agent {
       env["CLAUDECODE"] = "";
 
       // Set session info for introspection
+      env["AO_SESSION"] = config.sessionId;
       env["AO_SESSION_ID"] = config.sessionId;
 
       // NOTE: AO_PROJECT_ID is NOT set here - it's the caller's responsibility

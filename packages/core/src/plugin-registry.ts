@@ -30,8 +30,11 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   // Agents
   { slot: "agent", name: "claude-code", pkg: "@composio/ao-plugin-agent-claude-code" },
   { slot: "agent", name: "codex", pkg: "@composio/ao-plugin-agent-codex" },
+  { slot: "agent", name: "cursor", pkg: "@composio/ao-plugin-agent-cursor" },
   { slot: "agent", name: "aider", pkg: "@composio/ao-plugin-agent-aider" },
   { slot: "agent", name: "opencode", pkg: "@composio/ao-plugin-agent-opencode" },
+  { slot: "agent", name: "cursor", pkg: "@composio/ao-plugin-agent-cursor" },
+  { slot: "agent", name: "gemini", pkg: "@composio/ao-plugin-agent-gemini" },
   // Workspaces
   { slot: "workspace", name: "worktree", pkg: "@composio/ao-plugin-workspace-worktree" },
   { slot: "workspace", name: "clone", pkg: "@composio/ao-plugin-workspace-clone" },
@@ -51,6 +54,8 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   // Terminals
   { slot: "terminal", name: "iterm2", pkg: "@composio/ao-plugin-terminal-iterm2" },
   { slot: "terminal", name: "web", pkg: "@composio/ao-plugin-terminal-web" },
+  // Pollers
+  { slot: "poller", name: "github-pr", pkg: "@composio/ao-plugin-poller-github-pr" },
 ];
 
 /** Extract plugin-specific config from orchestrator config */
@@ -71,6 +76,22 @@ function extractPluginConfig(
         const { plugin: _plugin, ...rest } = notifierConfig as Record<string, unknown>;
         return rest;
       }
+    }
+  }
+
+  // SCM plugins are configured under config.plugins.<plugin-name> (e.g., plugins["scm-github"])
+  if (slot === "scm") {
+    const pluginConfig = config.plugins?.[`scm-${name}`];
+    if (pluginConfig && typeof pluginConfig === "object") {
+      return pluginConfig as Record<string, unknown>;
+    }
+  }
+
+  // Poller plugins: config.plugins["poller-<name>"] (e.g., plugins["poller-github-pr"])
+  if (slot === "poller") {
+    const pluginConfig = config.plugins?.[`poller-${name}`];
+    if (pluginConfig && typeof pluginConfig === "object") {
+      return pluginConfig as Record<string, unknown>;
     }
   }
 
