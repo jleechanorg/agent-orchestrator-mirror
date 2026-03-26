@@ -76,7 +76,7 @@ Activity states (orthogonal to lifecycle): `active`, `ready`, `idle`, `waiting_i
 
 ## Getting Started
 
-**Prerequisites**: Node.js 20+, pnpm 9.15+, Git 2.25+
+**Prerequisites**: Node.js 22 (see `.nvmrc`; engines allow 20+), pnpm 9.15+, Git 2.25+
 
 ```bash
 git clone https://github.com/ComposioHQ/agent-orchestrator.git

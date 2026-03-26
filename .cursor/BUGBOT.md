@@ -7,7 +7,7 @@ Agent Orchestrator is a TypeScript monorepo for managing parallel AI coding agen
 ## Tech Stack
 
 - TypeScript (strict mode, ESM with `.js` extensions in imports)
-- Node.js 20+ (use `node:` prefix for built-in modules)
+- Node.js 22+ for local dev (see repo `.nvmrc`; use `node:` prefix for built-in modules)
 - pnpm workspaces
 - Next.js 15 (App Router) for web dashboard
 - Commander.js for CLI

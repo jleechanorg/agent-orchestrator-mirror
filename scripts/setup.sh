@@ -11,17 +11,17 @@ echo ""
 
 # ─── Hard requirements (exit 1 if missing) ────────────────────────────────────
 
-# Node.js >= 20
+# Node.js >= 20 (22 recommended — match `.nvmrc` and CI)
 if ! command -v node &> /dev/null; then
   echo "ERROR: Node.js is not installed."
-  echo "  Install Node.js 20+: https://nodejs.org/en/download"
+  echo "  Install Node.js 22+ (see repo .nvmrc): https://nodejs.org/en/download"
   exit 1
 fi
 
 NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
 if [ "$NODE_MAJOR" -lt 20 ]; then
   echo "ERROR: Node.js $NODE_MAJOR.x detected, but 20+ is required."
-  echo "  Install Node.js 20+: https://nodejs.org/en/download"
+  echo "  Install Node.js 22+ (see repo .nvmrc): https://nodejs.org/en/download"
   exit 1
 fi
 echo "[ok] Node.js $(node --version)"

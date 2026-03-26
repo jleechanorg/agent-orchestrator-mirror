@@ -85,7 +85,7 @@ ensure_on_target_branch() {
 
 printf 'Agent Orchestrator Update\n\n'
 
-require_command node "install Node.js 20+"
+require_command node "install Node.js 22+ (see repo .nvmrc; minimum 20+)"
 
 cd "$REPO_ROOT"
 
