@@ -9,8 +9,7 @@ import {
 } from "@composio/ao-plugin-agent-base";
 import { execFileSync } from "node:child_process";
 import { readFile, stat, open } from "node:fs/promises";
-import type { Agent, ActivityDetection, AgentSessionInfo, PluginModule, ProjectConfig, Session } from "@composio/ao-core";
-import { DEFAULT_READY_THRESHOLD_MS } from "@composio/ao-core";
+import { DEFAULT_READY_THRESHOLD_MS, type Agent, type ActivityDetection, type AgentSessionInfo, type PluginModule, type ProjectConfig, type Session } from "@composio/ao-core";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
