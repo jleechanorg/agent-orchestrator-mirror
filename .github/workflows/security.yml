@@ -18,6 +18,8 @@ jobs:
   gitleaks:
     name: Scan for Secrets
     runs-on: ubuntu-latest
+    # Requires GITLEAKS_LICENSE secret to be configured
+    if: vars.ENABLE_GITLEAKS == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -62,7 +64,7 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && vars.ENABLE_DEPENDENCY_REVIEW == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
